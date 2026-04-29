@@ -55,7 +55,7 @@ def find_person_by_uid(uid):
 
 class NFCReader:
     def __init__(self):
-        self.reader=None;self.available=False;self.last_uid=None;self.last_read_time=0;self._init()
+        self.reader=None;self.available=False;self.last_uid=None;self.last_read_time=0
     def _init(self):
         for attempt in range(5):
             try:
@@ -132,6 +132,7 @@ def create_app(reader):
         global main_loop
         main_loop=asyncio.get_running_loop()
         print("[INFO] 主事件循环已就绪")
+        reader._init()
         if reader.available:
             threading.Thread(target=nfc_poll_loop,args=(reader,),daemon=True).start()
         else:print("[INFO] 无读卡器，演示模式")
