@@ -1,14 +1,12 @@
 """
-NFC 智能签到系统 v5.0
-搜索 · 拨号 · 撤销 · 手动计时 · 多车 · 多轮 · 临时加人
-python server.py → http://localhost:8000
+NFC v5.1 - 修复实时推送
 """
 import asyncio,csv,json,time,threading
 from datetime import datetime
 from pathlib import Path
 
 CONFIG={"host":"0.0.0.0","port":8000,"roster_file":"roster.csv","checkin_log":"checkin_log.csv","poll_interval":0.3}
-roster=[];ws_clients=set()
+roster=[];ws_clients=set();main_loop=None
 
 def load_roster():
     global roster;path=Path(CONFIG["roster_file"])
@@ -64,31 +62,56 @@ class NFCReader:
 
 async def broadcast(msg):
     if ws_clients:
-        d=json.dumps(msg,ensure_ascii=False);await asyncio.gather(*[c.send(d)for c in ws_clients],return_exceptions=True)
+        d=json.dumps(msg,ensure_ascii=False)
+        dead=set()
+        for c in ws_clients:
+            try:await c.send_text(d)
+            except:dead.add(c)
+        ws_clients.difference_update(dead)
 
-def nfc_poll_loop(reader,loop):
+def safe_broadcast(msg):
+    global main_loop
+    if main_loop is None:return
+    asyncio.run_coroutine_threadsafe(broadcast(msg),main_loop)
+
+def nfc_poll_loop(reader):
     print("[INFO] NFC轮询已启动")
     while True:
         uid=reader.read_uid()
         if uid:
+            print(f"[NFC] 读取到卡片: {uid}")
             person=find_person_by_uid(uid)
             if person:
                 if not person["checkedIn"]:
                     person["checkedIn"]=True;person["time"]=datetime.now().strftime("%H:%M:%S");log_checkin(person)
-                    asyncio.run_coroutine_threadsafe(broadcast({"type":"checkin","id":person["id"],"name":person["name"],"time":person["time"],"bus":person.get("bus",1),"phone":person.get("phone","")}),loop)
-                else:asyncio.run_coroutine_threadsafe(broadcast({"type":"duplicate","id":person["id"],"name":person["name"]}),loop)
-            else:asyncio.run_coroutine_threadsafe(broadcast({"type":"unknown","uid":uid}),loop)
+                    print(f"[签到] {person['name']} 签到成功 ({person['time']})")
+                    safe_broadcast({"type":"checkin","id":person["id"],"name":person["name"],"time":person["time"],"bus":person.get("bus",1),"phone":person.get("phone","")})
+                else:
+                    print(f"[签到] {person['name']} 已签到，忽略")
+                    safe_broadcast({"type":"duplicate","id":person["id"],"name":person["name"]})
+            else:
+                print(f"[WARN] 未知卡片 UID: {uid}")
+                safe_broadcast({"type":"unknown","uid":uid})
         time.sleep(CONFIG["poll_interval"])
 
-def create_app():
+def create_app(reader):
     from fastapi import FastAPI,WebSocket,WebSocketDisconnect
     from fastapi.responses import HTMLResponse,JSONResponse
     app=FastAPI(title="NFC签到")
+    @app.on_event("startup")
+    async def startup():
+        global main_loop
+        main_loop=asyncio.get_running_loop()
+        print("[INFO] 主事件循环已就绪")
+        if reader.available:
+            threading.Thread(target=nfc_poll_loop,args=(reader,),daemon=True).start()
+        else:print("[INFO] 无读卡器，演示模式")
     @app.get("/")
     async def index():return HTMLResponse(HTML)
     @app.websocket("/ws")
     async def ws_ep(ws:WebSocket):
         await ws.accept();ws_clients.add(ws)
+        print(f"[WS] 客户端已连接 ({len(ws_clients)})")
         await ws.send_json({"type":"roster","roster":roster})
         try:
             while True:
@@ -116,257 +139,18 @@ def create_app():
                         new_id=max([p["id"]for p in roster],default=-1)+1
                         roster.append({"id":new_id,"name":name,"uid":"","phone":"","bus":bus,"checkedIn":False,"time":None})
                         save_roster();await broadcast({"type":"roster","roster":roster})
-        except WebSocketDisconnect:ws_clients.discard(ws)
+        except WebSocketDisconnect:ws_clients.discard(ws);print(f"[WS] 断开 ({len(ws_clients)})")
     @app.get("/api/roster")
     async def get_roster():return JSONResponse(roster)
     return app
 
-HTML=r"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<title>NFC 签到</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-::-webkit-scrollbar{display:none}
-body{font-family:'PingFang SC','Noto Sans SC',-apple-system,sans-serif;background:#0a0a0f;color:#fff;min-height:100vh;min-height:100dvh;max-width:500px;margin:0 auto;overflow-x:hidden}
-input{font-family:inherit}
-@keyframes slideDown{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
-@keyframes popToast{from{opacity:0;transform:translateX(-50%) translateY(-10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
-@keyframes celebrateBg{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
-@keyframes pulse{0%,100%{opacity:0.5}50%{opacity:1}}
-.row-enter{animation:slideDown 0.3s ease-out}
-.header{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#0a0a0f 90%,transparent);padding:14px 16px 12px}
-.toast{position:fixed;top:100px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:8px;font-size:14px;background:rgba(255,152,0,0.15);border:1px solid rgba(255,152,0,0.3);color:#FFB74D;z-index:100;animation:popToast 0.2s ease-out;white-space:nowrap;display:none}
-.toast.show{display:block}
-.modal-bg{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:20px}
-.modal{background:#1a1a24;border-radius:16px;padding:24px;width:100%;max-width:340px;border:1px solid rgba(255,255,255,0.08)}
-.modal h3{font-size:18px;font-weight:700;margin-bottom:8px}
-.modal .desc{font-size:14px;color:rgba(255,255,255,0.4);margin-bottom:20px;line-height:1.5}
-.modal input{width:100%;padding:12px 14px;border-radius:10px;font-size:16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#fff;outline:none;margin-bottom:16px}
-.mbtn{flex:1;padding:12px 0;border-radius:10px;font-size:15px;cursor:pointer;font-family:inherit;text-align:center}
-.mbtn-cancel{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.4)}
-.mbtn-blue{background:rgba(0,176,255,0.15);border:1px solid rgba(0,176,255,0.3);color:#00B0FF;font-weight:600}
-.mbtn-red{background:rgba(255,107,107,0.15);border:1px solid rgba(255,107,107,0.3);color:#FF6B6B;font-weight:600}
-.mbtn-gold{background:rgba(255,176,0,0.15);border:1px solid rgba(255,176,0,0.3);color:#FFB000;font-weight:600}
-.overlay{position:fixed;inset:0;z-index:150;background:rgba(5,5,10,0.95);display:none;flex-direction:column;align-items:center;justify-content:center;animation:slideDown 0.4s ease-out}
-.overlay.show{display:flex}
-</style>
-</head>
-<body>
-<div class="toast" id="toast"></div>
-<div id="app"></div>
-<div class="overlay" id="overlay">
-  <div style="font-size:72px;margin-bottom:20px">🎉</div>
-  <div style="font-size:32px;font-weight:800;background:linear-gradient(135deg,#00E676,#00B0FF,#FF6D00);background-size:200% 200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:celebrateBg 3s ease infinite">全员到齐</div>
-  <div style="font-size:16px;color:rgba(255,255,255,0.4);margin-top:8px" id="ov-sub"></div>
-  <div style="font-size:14px;color:rgba(255,255,255,0.2);margin-top:4px">出发！</div>
-  <button onclick="document.getElementById('overlay').classList.remove('show')" style="margin-top:32px;padding:12px 40px;border-radius:10px;background:rgba(0,230,118,0.12);border:1px solid rgba(0,230,118,0.3);color:#00E676;font-size:16px;font-weight:600;cursor:pointer;font-family:inherit">关闭</button>
-</div>
-<script>
-let roster=[],ws=null,justId=null,ckOrder=0;
-let currentBus=1,round=1,roundHistory=[];
-let timerRunning=false,timerStart=null,timerElapsed=0,timerInterval=null;
-let searchQuery='';
-
-function fmtTime(s){return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}
-
-function playFX(t){try{const c=new(window.AudioContext||window.webkitAudioContext)(),n=c.currentTime;
-if(t==='scan'){const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.setValueAtTime(880,n);o.frequency.exponentialRampToValueAtTime(1320,n+0.08);g.gain.setValueAtTime(0.2,n);g.gain.exponentialRampToValueAtTime(0.01,n+0.2);o.start(n);o.stop(n+0.2)}
-else if(t==='complete'){[523,659,784,1047].forEach((f,i)=>{const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=f;g.gain.setValueAtTime(0.15,n+i*0.12);g.gain.exponentialRampToValueAtTime(0.01,n+i*0.12+0.4);o.start(n+i*0.12);o.stop(n+i*0.12+0.4)})}}catch(e){}}
-
-function toggleTimer(){
-if(timerRunning){timerRunning=false;clearInterval(timerInterval);timerInterval=null}
-else{timerStart=Date.now();timerElapsed=0;timerRunning=true;timerInterval=setInterval(()=>{timerElapsed=Math.floor((Date.now()-timerStart)/1000);renderTimerOnly()},1000)}
-render()}
-
-function renderTimerOnly(){
-const el=document.getElementById('timer-display');
-if(!el)return;
-const s=timerElapsed;
-el.textContent=fmtTime(s);
-el.style.color=s>300?'#FF6B6B':s>120?'#FFB000':'#00E676';
-el.style.animation=s>120?'pulse 1.5s infinite':'none'}
-
-function connectWS(){try{ws=new WebSocket('ws://'+location.host+'/ws');
-ws.onmessage=e=>{const m=JSON.parse(e.data);
-if(m.type==='roster'){roster=m.roster;roster.forEach(p=>{if(!p.ckOrder)p.ckOrder=0});render()}
-else if(m.type==='checkin')doCheckin(m.id,m.name,m.time);
-else if(m.type==='duplicate')showToast(m.name+' 已签到');
-else if(m.type==='unknown')showToast('未识别卡片')};
-ws.onclose=()=>setTimeout(connectWS,3000)}catch(e){}}
-
-function doCheckin(id,name,time){
-const p=roster.find(r=>r.id===id);if(!p)return;
-if(p.checkedIn){showToast(p.name+' 已签到');return}
-ckOrder++;p.checkedIn=true;p.time=time||new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});p.ckOrder=ckOrder;
-justId=id;playFX('scan');render();setTimeout(()=>{justId=null;render()},1200);
-const busM=roster.filter(x=>x.bus===p.bus);
-if(busM.every(x=>x.checkedIn)){setTimeout(()=>{
-const sub=p.bus+' 车 · '+busM.length+' 人'+(timerRunning?' · 用时 '+fmtTime(timerElapsed):'');
-document.getElementById('ov-sub').textContent=sub;
-document.getElementById('overlay').classList.add('show');playFX('complete')},600)}}
-
-function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1500)}
-function demoScan(){const unc=roster.filter(r=>r.bus===currentBus&&!r.checkedIn);if(!unc.length)return;const p=unc[Math.floor(Math.random()*unc.length)];doCheckin(p.id,p.name)}
-function demoClick(id){const p=roster.find(r=>r.id===id);if(p&&!p.checkedIn)doCheckin(p.id,p.name)}
-function switchBus(b){currentBus=b;document.getElementById('overlay').classList.remove('show');searchQuery='';render()}
-function setSearch(v){searchQuery=v;render()}
-function clearSearch(){searchQuery='';render();const el=document.getElementById('search-input');if(el)el.focus()}
-
-function showNewRoundModal(){
-const bg=document.createElement('div');bg.className='modal-bg';bg.id='m-round';bg.onclick=e=>{if(e.target===bg)bg.remove()};
-const timerInfo=timerRunning?'，已等待 '+fmtTime(timerElapsed):'';
-bg.innerHTML='<div class="modal"><h3>开始新一轮？</h3><div class="desc">当前第 '+round+' 轮（'+currentBus+' 车'+timerInfo+'）的签到记录将被保存，计时器重置。</div><div style="display:flex;gap:10px"><button class="mbtn mbtn-cancel" onclick="this.closest(\'.modal-bg\').remove()">取消</button><button class="mbtn mbtn-blue" onclick="startNewRound()">确认</button></div></div>';
-document.body.appendChild(bg)}
-
-function startNewRound(){
-const busR=roster.filter(p=>p.bus===currentBus);
-roundHistory.push({round,bus:currentBus,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}),elapsed:timerRunning?timerElapsed:null,data:busR.map(p=>({name:p.name,checkedIn:p.checkedIn,time:p.time,bus:p.bus}))});
-roster.forEach(p=>{if(p.bus===currentBus){p.checkedIn=false;p.time=null;p.ckOrder=0}});
-ckOrder=0;round++;timerRunning=false;timerElapsed=0;timerStart=null;if(timerInterval){clearInterval(timerInterval);timerInterval=null}
-document.getElementById('overlay').classList.remove('show');
-const m=document.getElementById('m-round');if(m)m.remove();searchQuery='';render()}
-
-function showAddModal(){
-const bg=document.createElement('div');bg.className='modal-bg';bg.id='m-add';bg.onclick=e=>{if(e.target===bg)bg.remove()};
-bg.innerHTML='<div class="modal"><h3>临时加人</h3><div style="font-size:13px;color:rgba(255,255,255,0.3);margin-bottom:12px">添加到 '+currentBus+' 车</div><input type="text" id="temp-name" placeholder="输入姓名" autofocus><div style="display:flex;gap:10px"><button class="mbtn mbtn-cancel" onclick="this.closest(\'.modal-bg\').remove()">取消</button><button class="mbtn mbtn-gold" onclick="addTemp()">添加</button></div></div>';
-document.body.appendChild(bg);setTimeout(()=>{const inp=document.getElementById('temp-name');if(inp){inp.focus();inp.onkeydown=e=>{if(e.key==='Enter')addTemp()}}},100)}
-
-function addTemp(){
-const inp=document.getElementById('temp-name');if(!inp)return;const name=inp.value.trim();if(!name)return;
-const maxId=Math.max(...roster.map(p=>p.id),0);
-roster.push({id:maxId+1,name,uid:'',phone:'',bus:currentBus,checkedIn:false,time:null,ckOrder:0,isTemp:true});
-const m=document.getElementById('m-add');if(m)m.remove();showToast('已添加 '+name);render()}
-
-function showUndoModal(id){
-const p=roster.find(r=>r.id===id);if(!p)return;
-const bg=document.createElement('div');bg.className='modal-bg';bg.id='m-undo';bg.onclick=e=>{if(e.target===bg)bg.remove()};
-bg.innerHTML='<div class="modal"><h3>撤销签到</h3><div class="desc">确认将 <span style="color:#fff;font-weight:600">'+p.name+'</span> 撤销为未签到？</div><div style="display:flex;gap:10px"><button class="mbtn mbtn-cancel" onclick="this.closest(\'.modal-bg\').remove()">取消</button><button class="mbtn mbtn-red" onclick="doUndo('+id+')">确认撤销</button></div></div>';
-document.body.appendChild(bg)}
-
-function doUndo(id){
-const p=roster.find(r=>r.id===id);if(p){p.checkedIn=false;p.time=null;p.ckOrder=0}
-document.getElementById('overlay').classList.remove('show');
-const m=document.getElementById('m-undo');if(m)m.remove();showToast('已撤销签到');render()}
-
-function showHistoryModal(){
-const bg=document.createElement('div');bg.style.cssText='position:fixed;inset:0;z-index:200;background:rgba(0,0,0,0.85);display:flex;flex-direction:column';bg.id='m-hist';
-let h='<div style="flex:1;overflow:auto;padding:20px 16px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px"><div style="font-size:20px;font-weight:700">签到记录</div><button style="padding:6px 16px;border-radius:6px;font-size:13px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.4);cursor:pointer;font-family:inherit" onclick="document.getElementById(\'m-hist\').remove()">关闭</button></div>';
-if(!roundHistory.length)h+='<div style="color:rgba(255,255,255,0.2);text-align:center;margin-top:60px">暂无历史记录</div>';
-else roundHistory.slice().reverse().forEach(rh=>{
-const tot=rh.data.length,ck=rh.data.filter(p=>p.checkedIn).length,miss=rh.data.filter(p=>!p.checkedIn);
-h+='<div style="background:rgba(255,255,255,0.03);border-radius:12px;border:1px solid rgba(255,255,255,0.06);padding:16px;margin-bottom:12px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div><span style="font-size:15px;font-weight:600">第 '+rh.round+' 轮</span><span style="font-size:12px;color:rgba(255,255,255,0.2);margin-left:8px">'+rh.bus+' 车 · '+rh.time+(rh.elapsed!=null?' · 用时 '+fmtTime(rh.elapsed):'')+'</span></div><div style="font-size:12px;padding:2px 10px;border-radius:4px;background:'+(ck===tot?'rgba(0,230,118,0.1)':'rgba(255,107,107,0.1)')+';color:'+(ck===tot?'#00E676':'#FF6B6B')+'">'+ck+'/'+tot+'</div></div>';
-if(miss.length)h+='<div style="font-size:11px;color:#FF6B6B;margin-bottom:6px">未到：</div><div style="font-size:14px;color:rgba(255,255,255,0.5);line-height:1.8">'+miss.map(p=>p.name).join('、')+'</div>';
-else h+='<div style="font-size:13px;color:rgba(0,230,118,0.5)">全员到齐 ✓</div>';
-h+='</div>'});
-h+='</div>';bg.innerHTML=h;document.body.appendChild(bg)}
-
-function render(){
-const busR=roster.filter(p=>p.bus===currentBus);
-const ck=busR.filter(p=>p.checkedIn).length,tot=busR.length,unc=tot-ck;
-const buses=[...new Set(roster.map(p=>p.bus||1))].sort();
-const q=searchQuery.trim().toLowerCase();
-const list=q?busR.filter(p=>p.name.toLowerCase().includes(q)):busR;
-const notYet=list.filter(p=>!p.checkedIn).sort((a,b)=>a.id-b.id);
-const done=list.filter(p=>p.checkedIn).sort((a,b)=>b.ckOrder-a.ckOrder);
-
-let html='<div class="header">';
-// Top bar
-html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div style="display:flex;align-items:center;gap:8px"><span style="font-size:15px;font-weight:600;color:rgba(255,255,255,0.4)">NFC 签到</span><span style="font-size:12px;color:rgba(255,255,255,0.2);background:rgba(255,255,255,0.05);padding:2px 8px;border-radius:4px">第 '+round+' 轮</span></div>';
-html+='<div style="display:flex;gap:6px"><button style="padding:5px 12px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;background:rgba(0,230,118,0.12);border:1px solid rgba(0,230,118,0.25);color:#00E676;font-family:inherit" onclick="demoScan()">模拟刷卡</button>';
-if(roundHistory.length)html+='<button style="padding:5px 10px;border-radius:6px;font-size:12px;cursor:pointer;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:rgba(255,255,255,0.3);font-family:inherit" onclick="showHistoryModal()">记录</button>';
-html+='</div></div>';
-
-// Timer bar
-html+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;border-radius:8px;background:'+(timerRunning?'rgba(255,255,255,0.03)':'transparent')+';border:1px solid '+(timerRunning?'rgba(255,255,255,0.06)':'transparent')+';transition:all 0.3s">';
-html+='<button onclick="toggleTimer()" style="padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;transition:all 0.2s;background:'+(timerRunning?'rgba(255,107,107,0.12)':'rgba(0,176,255,0.12)')+';border:1px solid '+(timerRunning?'rgba(255,107,107,0.25)':'rgba(0,176,255,0.25)')+';color:'+(timerRunning?'#FF6B6B':'#00B0FF')+'">'+(timerRunning?'⏸ 停止计时':'▶ 开始计时')+'</button>';
-if(timerRunning){const s=timerElapsed;html+='<span id="timer-display" style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:'+(s>300?'#FF6B6B':s>120?'#FFB000':'#00E676')+';'+(s>120?'animation:pulse 1.5s infinite':'')+'">'+fmtTime(s)+'</span>'}
-else if(timerElapsed>0)html+='<span style="font-size:13px;color:rgba(255,255,255,0.2)">上次计时 '+fmtTime(timerElapsed)+'</span>';
-html+='</div>';
-
-// Bus tabs
-if(buses.length>1){html+='<div style="display:flex;gap:8px;margin-bottom:10px">';
-buses.forEach(b=>{const bc=roster.filter(p=>p.bus===b&&p.checkedIn).length,bt=roster.filter(p=>p.bus===b).length,act=b===currentBus;
-html+='<button onclick="switchBus('+b+')" style="flex:1;padding:8px 0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;text-align:center;transition:all 0.2s;background:'+(act?'rgba(0,176,255,0.12)':'rgba(255,255,255,0.03)')+';border:1px solid '+(act?'rgba(0,176,255,0.3)':'rgba(255,255,255,0.06)')+';color:'+(act?'#00B0FF':'rgba(255,255,255,0.3)')+'">'+b+' 车 <span style="font-size:11px;opacity:0.6">'+bc+'/'+bt+'</span></button>'});
-html+='</div>'}
-
-// Stats
-html+='<div style="display:flex;align-items:center;gap:12px;background:rgba(255,255,255,0.03);border-radius:12px;padding:12px 16px;border:1px solid rgba(255,255,255,0.05)"><div style="flex:1"><div style="font-size:36px;font-weight:800;line-height:1;color:'+(unc>0?'#FF6B6B':'#00E676')+'">'+unc+'</div><div style="font-size:13px;color:rgba(255,255,255,0.35);margin-top:4px">'+(unc>0?'未到':'全员到齐')+'</div></div>';
-html+='<div style="flex:2"><div style="height:8px;border-radius:4px;background:rgba(255,255,255,0.06);overflow:hidden"><div style="height:100%;border-radius:4px;background:'+(ck===tot?'linear-gradient(90deg,#00E676,#69F0AE)':'linear-gradient(90deg,#00B0FF,#00E5FF)')+';width:'+(tot?(ck/tot*100):0)+'%;transition:width 0.5s ease-out"></div></div>';
-html+='<div style="display:flex;justify-content:space-between;font-size:12px;color:rgba(255,255,255,0.25);margin-top:4px"><span>已到 '+ck+'</span><span>共 '+tot+'</span></div></div></div>';
-
-// Actions
-html+='<div style="display:flex;gap:8px;margin-top:10px"><button onclick="showNewRoundModal()" style="flex:1;padding:10px 0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;text-align:center;background:rgba(0,176,255,0.08);border:1px solid rgba(0,176,255,0.2);color:#00B0FF">开始新一轮</button>';
-html+='<button onclick="showAddModal()" style="flex:1;padding:10px 0;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;text-align:center;background:rgba(255,176,0,0.08);border:1px solid rgba(255,176,0,0.2);color:#FFB000">+ 临时加人</button></div>';
-
-// Search
-html+='<div style="position:relative;margin-top:10px"><input id="search-input" type="text" value="'+searchQuery.replace(/"/g,'&quot;')+'" oninput="setSearch(this.value)" placeholder="搜索姓名..." style="width:100%;padding:10px 14px 10px 36px;border-radius:8px;font-size:15px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:#fff;outline:none;box-sizing:border-box">';
-html+='<span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:14px;color:rgba(255,255,255,0.2)">🔍</span>';
-if(searchQuery)html+='<button onclick="clearSearch()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.4);font-size:12px;cursor:pointer;padding:0">✕</button>';
-html+='</div></div>';
-
-// List
-html+='<div style="padding:0 16px 100px">';
-if(notYet.length>0){
-html+='<div style="font-size:12px;font-weight:600;color:#FF6B6B;padding:8px 0;letter-spacing:1px;border-bottom:1px solid rgba(255,107,107,0.15);margin-bottom:4px;display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:#FF6B6B;display:inline-block"></span>未到 · '+notYet.length+' 人';
-if(q)html+='<span style="color:rgba(255,255,255,0.2);font-weight:400">（搜索中）</span>';
-html+='</div>';
-notYet.forEach(p=>{
-html+='<div class="'+(p.id===justId?'row-enter':'')+'" style="display:flex;align-items:center;padding:12px 12px;border-bottom:1px solid rgba(255,255,255,0.04)">';
-html+='<div onclick="demoClick('+p.id+')" style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,rgba(255,107,107,0.15),rgba(255,107,107,0.05));display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#FF6B6B;margin-right:12px;flex-shrink:0;cursor:pointer">'+p.name[0]+'</div>';
-html+='<div onclick="demoClick('+p.id+')" style="flex:1;cursor:pointer"><div style="font-size:18px;font-weight:600;color:#fff">'+p.name;
-if(p.isTemp)html+='<span style="font-size:11px;color:#FFB000;margin-left:6px">临时</span>';
-html+='</div></div>';
-if(p.phone)html+='<a href="tel:'+p.phone+'" onclick="event.stopPropagation()" style="width:36px;height:36px;border-radius:8px;background:rgba(0,230,118,0.08);border:1px solid rgba(0,230,118,0.15);display:flex;align-items:center;justify-content:center;text-decoration:none;flex-shrink:0;margin-left:8px"><span style="font-size:16px">📞</span></a>';
-html+='</div>'})}
-
-if(done.length>0){
-html+='<div style="font-size:12px;font-weight:600;color:rgba(0,230,118,0.5);padding:12px 0 8px;letter-spacing:1px;border-bottom:1px solid rgba(0,230,118,0.08);margin-top:8px;margin-bottom:4px;display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:rgba(0,230,118,0.5);display:inline-block"></span>已到 · '+done.length+' 人</div>';
-done.forEach(p=>{
-html+='<div class="'+(p.id===justId?'row-enter':'')+'" style="display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,0.02);opacity:0.4">';
-html+='<div style="width:32px;height:32px;border-radius:8px;background:rgba(0,230,118,0.08);display:flex;align-items:center;justify-content:center;font-size:13px;color:rgba(0,230,118,0.6);margin-right:12px;flex-shrink:0">✓</div>';
-html+='<div style="flex:1"><span style="font-size:15px;color:rgba(255,255,255,0.6)">'+p.name;
-if(p.isTemp)html+='<span style="font-size:11px;color:rgba(255,176,0,0.4);margin-left:6px">临时</span>';
-html+='</span></div>';
-html+='<div style="font-size:11px;color:rgba(255,255,255,0.15);margin-right:8px">'+p.time+'</div>';
-html+='<button onclick="showUndoModal('+p.id+')" style="padding:4px 10px;border-radius:6px;font-size:11px;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);color:rgba(255,255,255,0.3);cursor:pointer;font-family:inherit;flex-shrink:0">撤销</button>';
-html+='</div>'})}
-
-if(q&&notYet.length===0&&done.length===0)html+='<div style="text-align:center;padding:40px 0;color:rgba(255,255,255,0.15)">未找到「'+q+'」</div>';
-html+='</div>';
-
-document.getElementById('app').innerHTML=html;
-// Restore search cursor position
-const si=document.getElementById('search-input');if(si&&document.activeElement!==si&&q){si.focus();si.setSelectionRange(q.length,q.length)}}
-
-// Init
-!function(){const nm="张伟,李娜,王强,刘洋,陈静,杨磊,赵敏,黄海,周芳,吴涛,徐明,孙悦,胡博,朱雅,高飞,林慧,何鑫,郭欣,马超,罗平,梁宇,宋婷,郑刚,谢瑶,韩旭,唐睿,冯思,于晨,董萌,萧阳,程峰,曹雨,袁翔,邓佳,许乐,傅琪,沈昊,曾诗,彭志,吕建,苏梦,卢岩,蒋华,蔡文,贾鹏,丁霞,魏国,薛勇,叶军,阎杰,余欣怡,潘天宇,杜雅琪,戴浩然,夏诗涵,钟博文,汪嘉欣,田睿阳,任梦瑶,姜志远,范雨萱,方俊杰,石佳慧,姚宇航,谭思琪,廖浩宇,邹心怡,熊明哲,金雅婷,陆天翔,郝子涵,孔思远,白雨桐,崔晨曦,康若溪,毛嘉豪,邱紫萱,秦逸飞,江诗语,尹浩铭,钱思颖,龙峻熙,万梓萌,段子墨,雷可欣,侯文博,龚雨彤,邵明轩,洪思瑜,贺子豪,文雅馨,常博远,温可馨,武逸辰,柳思琦,施皓宇,顾梦涵,牛嘉琪,尚子轩,樊悦然".split(',');
-const ph=nm.map((_,i)=>'1380000'+(1001+i));
-for(let i=0;i<nm.length;i++)roster.push({id:i,name:nm[i],uid:'',phone:ph[i],bus:i<53?1:2,checkedIn:false,time:null,ckOrder:0,isTemp:false})}();
-render();connectWS();
-</script>
-</body>
-</html>"""
+HTML=r"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no"><title>NFC 签到</title><style>*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}::-webkit-scrollbar{display:none}body{font-family:'PingFang SC','Noto Sans SC',-apple-system,sans-serif;background:#0a0a0f;color:#fff;min-height:100vh;max-width:500px;margin:0 auto}input{font-family:inherit}@keyframes slideDown{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}@keyframes popToast{from{opacity:0;transform:translateX(-50%) translateY(-10px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}@keyframes celebrateBg{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}@keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}}.row-enter{animation:slideDown .3s ease-out}.header{position:sticky;top:0;z-index:20;background:linear-gradient(180deg,#0a0a0f 90%,transparent);padding:14px 16px 12px}.toast{position:fixed;top:100px;left:50%;transform:translateX(-50%);padding:8px 20px;border-radius:8px;font-size:14px;background:rgba(255,152,0,.15);border:1px solid rgba(255,152,0,.3);color:#FFB74D;z-index:100;animation:popToast .2s;white-space:nowrap;display:none}.toast.show{display:block}.modal-bg{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:20px}.modal{background:#1a1a24;border-radius:16px;padding:24px;width:100%;max-width:340px;border:1px solid rgba(255,255,255,.08)}.modal h3{font-size:18px;font-weight:700;margin-bottom:8px}.modal .desc{font-size:14px;color:rgba(255,255,255,.4);margin-bottom:20px;line-height:1.5}.modal input{width:100%;padding:12px 14px;border-radius:10px;font-size:16px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#fff;outline:none;margin-bottom:16px}.mbtn{flex:1;padding:12px 0;border-radius:10px;font-size:15px;cursor:pointer;font-family:inherit;text-align:center}.mbtn-cancel{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.4)}.mbtn-blue{background:rgba(0,176,255,.15);border:1px solid rgba(0,176,255,.3);color:#00B0FF;font-weight:600}.mbtn-red{background:rgba(255,107,107,.15);border:1px solid rgba(255,107,107,.3);color:#FF6B6B;font-weight:600}.mbtn-gold{background:rgba(255,176,0,.15);border:1px solid rgba(255,176,0,.3);color:#FFB000;font-weight:600}.overlay{position:fixed;inset:0;z-index:150;background:rgba(5,5,10,.95);display:none;flex-direction:column;align-items:center;justify-content:center;animation:slideDown .4s}.overlay.show{display:flex}</style></head><body><div class="toast" id="toast"></div><div id="app"></div><div class="overlay" id="overlay"><div style="font-size:72px;margin-bottom:20px">🎉</div><div style="font-size:32px;font-weight:800;background:linear-gradient(135deg,#00E676,#00B0FF,#FF6D00);background-size:200% 200%;-webkit-background-clip:text;-webkit-text-fill-color:transparent;animation:celebrateBg 3s ease infinite">全员到齐</div><div style="font-size:16px;color:rgba(255,255,255,.4);margin-top:8px" id="ov-sub"></div><div style="font-size:14px;color:rgba(255,255,255,.2);margin-top:4px">出发！</div><button onclick="document.getElementById('overlay').classList.remove('show')" style="margin-top:32px;padding:12px 40px;border-radius:10px;background:rgba(0,230,118,.12);border:1px solid rgba(0,230,118,.3);color:#00E676;font-size:16px;font-weight:600;cursor:pointer;font-family:inherit">关闭</button></div><script>let roster=[],ws=null,justId=null,ckOrder=0,currentBus=1,round=1,roundHistory=[],timerRunning=false,timerStart=null,timerElapsed=0,timerInterval=null,searchQuery='';function fmtTime(s){return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')}function playFX(t){try{const c=new(window.AudioContext||window.webkitAudioContext)(),n=c.currentTime;if(t==='scan'){const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.setValueAtTime(880,n);o.frequency.exponentialRampToValueAtTime(1320,n+.08);g.gain.setValueAtTime(.2,n);g.gain.exponentialRampToValueAtTime(.01,n+.2);o.start(n);o.stop(n+.2)}else if(t==='complete'){[523,659,784,1047].forEach((f,i)=>{const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=f;g.gain.setValueAtTime(.15,n+i*.12);g.gain.exponentialRampToValueAtTime(.01,n+i*.12+.4);o.start(n+i*.12);o.stop(n+i*.12+.4)})}}catch(e){}}function toggleTimer(){if(timerRunning){timerRunning=false;clearInterval(timerInterval);timerInterval=null}else{timerStart=Date.now();timerElapsed=0;timerRunning=true;timerInterval=setInterval(()=>{timerElapsed=Math.floor((Date.now()-timerStart)/1000);const el=document.getElementById('timer-display');if(el){el.textContent=fmtTime(timerElapsed);el.style.color=timerElapsed>300?'#FF6B6B':timerElapsed>120?'#FFB000':'#00E676';el.style.animation=timerElapsed>120?'pulse 1.5s infinite':'none'}},1000)}render()}function connectWS(){try{ws=new WebSocket('ws://'+location.host+'/ws');ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='roster'){roster=m.roster;roster.forEach(p=>{if(!p.ckOrder)p.ckOrder=0});render()}else if(m.type==='checkin')doCheckin(m.id,m.name,m.time);else if(m.type==='duplicate')showToast(m.name+' 已签到');else if(m.type==='unknown')showToast('未识别卡片')};ws.onclose=()=>setTimeout(connectWS,3000)}catch(e){setTimeout(connectWS,3000)}}function doCheckin(id,name,time){const p=roster.find(r=>r.id===id);if(!p)return;if(p.checkedIn){showToast(p.name+' 已签到');return}ckOrder++;p.checkedIn=true;p.time=time||new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'});p.ckOrder=ckOrder;justId=id;playFX('scan');render();setTimeout(()=>{justId=null;render()},1200);const bm=roster.filter(x=>x.bus===p.bus);if(bm.every(x=>x.checkedIn)){setTimeout(()=>{document.getElementById('ov-sub').textContent=p.bus+' 车 · '+bm.length+' 人'+(timerRunning?' · 用时 '+fmtTime(timerElapsed):'');document.getElementById('overlay').classList.add('show');playFX('complete')},600)}}function showToast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),1500)}function demoScan(){const u=roster.filter(r=>r.bus===currentBus&&!r.checkedIn);if(u.length)doCheckin(u[Math.floor(Math.random()*u.length)].id)}function demoClick(id){const p=roster.find(r=>r.id===id);if(p&&!p.checkedIn)doCheckin(p.id,p.name)}function switchBus(b){currentBus=b;document.getElementById('overlay').classList.remove('show');searchQuery='';render()}function setSearch(v){searchQuery=v;render()}function clearSearch(){searchQuery='';render();document.getElementById('search-input')?.focus()}function showNewRoundModal(){const bg=document.createElement('div');bg.className='modal-bg';bg.id='m-round';bg.onclick=e=>{if(e.target===bg)bg.remove()};bg.innerHTML='<div class="modal"><h3>开始新一轮？</h3><div class="desc">第 '+round+' 轮（'+currentBus+' 车'+(timerRunning?'，已等待 '+fmtTime(timerElapsed):'')+'）记录将保存并重置。</div><div style="display:flex;gap:10px"><button class="mbtn mbtn-cancel" onclick="this.closest(\'.modal-bg\').remove()">取消</button><button class="mbtn mbtn-blue" onclick="startNewRound()">确认</button></div></div>';document.body.appendChild(bg)}function startNewRound(){const br=roster.filter(p=>p.bus===currentBus);roundHistory.push({round,bus:currentBus,time:new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'}),elapsed:timerRunning?timerElapsed:null,data:br.map(p=>({name:p.name,checkedIn:p.checkedIn,time:p.time,bus:p.bus}))});roster.forEach(p=>{if(p.bus===currentBus){p.checkedIn=false;p.time=null;p.ckOrder=0}});ckOrder=0;round++;timerRunning=false;timerElapsed=0;timerStart=null;if(timerInterval){clearInterval(timerInterval);timerInterval=null}document.getElementById('overlay').classList.remove('show');document.getElementById('m-round')?.remove();searchQuery='';render()}function showAddModal(){const bg=document.createElement('div');bg.className='modal-bg';bg.id='m-add';bg.onclick=e=>{if(e.target===bg)bg.remove()};bg.innerHTML='<div class="modal"><h3>临时加人</h3><div style="font-size:13px;color:rgba(255,255,255,.3);margin-bottom:12px">添加到 '+currentBus+' 车</div><input type="text" id="temp-name" placeholder="输入姓名"><div style="display:flex;gap:10px"><button class="mbtn mbtn-cancel" onclick="this.closest(\'.modal-bg\').remove()">取消</button><button class="mbtn mbtn-gold" onclick="addTemp()">添加</button></div></div>';document.body.appendChild(bg);setTimeout(()=>{const i=document.getElementById('temp-name');if(i){i.focus();i.onkeydown=e=>{if(e.key==='Enter')addTemp()}}},100)}function addTemp(){const i=document.getElementById('temp-name');if(!i)return;const n=i.value.trim();if(!n)return;roster.push({id:Math.max(...roster.map(p=>p.id),0)+1,name:n,uid:'',phone:'',bus:currentBus,checkedIn:false,time:null,ckOrder:0,isTemp:true});document.getElementById('m-add')?.remove();showToast('已添加 '+n);render()}function showUndoModal(id){const p=roster.find(r=>r.id===id);if(!p)return;const bg=document.createElement('div');bg.className='modal-bg';bg.id='m-undo';bg.onclick=e=>{if(e.target===bg)bg.remove()};bg.innerHTML='<div class="modal"><h3>撤销签到</h3><div class="desc">确认将 <b style="color:#fff">'+p.name+'</b> 撤销为未签到？</div><div style="display:flex;gap:10px"><button class="mbtn mbtn-cancel" onclick="this.closest(\'.modal-bg\').remove()">取消</button><button class="mbtn mbtn-red" onclick="doUndo('+id+')">确认撤销</button></div></div>';document.body.appendChild(bg)}function doUndo(id){const p=roster.find(r=>r.id===id);if(p){p.checkedIn=false;p.time=null;p.ckOrder=0}document.getElementById('overlay').classList.remove('show');document.getElementById('m-undo')?.remove();showToast('已撤销');render()}function showHistoryModal(){const bg=document.createElement('div');bg.style.cssText='position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.85);display:flex;flex-direction:column';bg.id='m-hist';let h='<div style="flex:1;overflow:auto;padding:20px 16px"><div style="display:flex;justify-content:space-between;margin-bottom:20px"><div style="font-size:20px;font-weight:700">签到记录</div><button style="padding:6px 16px;border-radius:6px;font-size:13px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);color:rgba(255,255,255,.4);cursor:pointer;font-family:inherit" onclick="document.getElementById(\'m-hist\').remove()">关闭</button></div>';if(!roundHistory.length)h+='<div style="color:rgba(255,255,255,.2);text-align:center;margin-top:60px">暂无</div>';else roundHistory.slice().reverse().forEach(r=>{const t=r.data.length,c=r.data.filter(p=>p.checkedIn).length,ms=r.data.filter(p=>!p.checkedIn);h+='<div style="background:rgba(255,255,255,.03);border-radius:12px;border:1px solid rgba(255,255,255,.06);padding:16px;margin-bottom:12px"><div style="display:flex;justify-content:space-between;margin-bottom:10px"><div><b>第 '+r.round+' 轮</b> <span style="font-size:12px;color:rgba(255,255,255,.2)">'+r.bus+'车 · '+r.time+(r.elapsed!=null?' · '+fmtTime(r.elapsed):'')+'</span></div><span style="font-size:12px;padding:2px 10px;border-radius:4px;background:'+(c===t?'rgba(0,230,118,.1)':'rgba(255,107,107,.1)')+';color:'+(c===t?'#00E676':'#FF6B6B')+'">'+c+'/'+t+'</span></div>';if(ms.length)h+='<div style="font-size:11px;color:#FF6B6B;margin-bottom:4px">未到：</div><div style="font-size:14px;color:rgba(255,255,255,.5);line-height:1.8">'+ms.map(p=>p.name).join('、')+'</div>';else h+='<div style="font-size:13px;color:rgba(0,230,118,.5)">全员到齐 ✓</div>';h+='</div>'});h+='</div>';bg.innerHTML=h;document.body.appendChild(bg)}function render(){const br=roster.filter(p=>p.bus===currentBus),ck=br.filter(p=>p.checkedIn).length,tot=br.length,unc=tot-ck,buses=[...new Set(roster.map(p=>p.bus||1))].sort(),q=searchQuery.trim().toLowerCase(),fl=q?br.filter(p=>p.name.toLowerCase().includes(q)):br,ny=fl.filter(p=>!p.checkedIn).sort((a,b)=>a.id-b.id),dn=fl.filter(p=>p.checkedIn).sort((a,b)=>b.ckOrder-a.ckOrder);let h='<div class="header"><div style="display:flex;justify-content:space-between;margin-bottom:10px"><div style="display:flex;align-items:center;gap:8px"><span style="font-size:15px;font-weight:600;color:rgba(255,255,255,.4)">NFC 签到</span><span style="font-size:12px;color:rgba(255,255,255,.2);background:rgba(255,255,255,.05);padding:2px 8px;border-radius:4px">第'+round+'轮</span></div><div style="display:flex;gap:6px"><button style="padding:5px 12px;border-radius:6px;font-size:12px;background:rgba(0,230,118,.12);border:1px solid rgba(0,230,118,.25);color:#00E676;cursor:pointer;font-family:inherit" onclick="demoScan()">模拟刷卡</button>';if(roundHistory.length)h+='<button style="padding:5px 10px;border-radius:6px;font-size:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.3);cursor:pointer;font-family:inherit" onclick="showHistoryModal()">记录</button>';h+='</div></div><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;border-radius:8px;background:'+(timerRunning?'rgba(255,255,255,.03)':'transparent')+';border:1px solid '+(timerRunning?'rgba(255,255,255,.06)':'transparent')+'"><button onclick="toggleTimer()" style="padding:5px 14px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;font-family:inherit;background:'+(timerRunning?'rgba(255,107,107,.12)':'rgba(0,176,255,.12)')+';border:1px solid '+(timerRunning?'rgba(255,107,107,.25)':'rgba(0,176,255,.25)')+';color:'+(timerRunning?'#FF6B6B':'#00B0FF')+'">'+(timerRunning?'⏸ 停止计时':'▶ 开始计时')+'</button>';if(timerRunning){const s=timerElapsed;h+='<span id="timer-display" style="font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:'+(s>300?'#FF6B6B':s>120?'#FFB000':'#00E676')+'">'+fmtTime(s)+'</span>'}else if(timerElapsed>0)h+='<span style="font-size:13px;color:rgba(255,255,255,.2)">上次 '+fmtTime(timerElapsed)+'</span>';h+='</div>';if(buses.length>1){h+='<div style="display:flex;gap:8px;margin-bottom:10px">';buses.forEach(b=>{const bc=roster.filter(p=>p.bus===b&&p.checkedIn).length,bt=roster.filter(p=>p.bus===b).length;h+='<button onclick="switchBus('+b+')" style="flex:1;padding:8px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;text-align:center;background:'+(b===currentBus?'rgba(0,176,255,.12)':'rgba(255,255,255,.03)')+';border:1px solid '+(b===currentBus?'rgba(0,176,255,.3)':'rgba(255,255,255,.06)')+';color:'+(b===currentBus?'#00B0FF':'rgba(255,255,255,.3)')+'">'+b+'车 <span style="font-size:11px;opacity:.6">'+bc+'/'+bt+'</span></button>'});h+='</div>'}h+='<div style="display:flex;align-items:center;gap:12px;background:rgba(255,255,255,.03);border-radius:12px;padding:12px 16px;border:1px solid rgba(255,255,255,.05)"><div style="flex:1"><div style="font-size:36px;font-weight:800;line-height:1;color:'+(unc>0?'#FF6B6B':'#00E676')+'">'+unc+'</div><div style="font-size:13px;color:rgba(255,255,255,.35);margin-top:4px">'+(unc>0?'未到':'全员到齐')+'</div></div><div style="flex:2"><div style="height:8px;border-radius:4px;background:rgba(255,255,255,.06);overflow:hidden"><div style="height:100%;border-radius:4px;background:'+(ck===tot?'linear-gradient(90deg,#00E676,#69F0AE)':'linear-gradient(90deg,#00B0FF,#00E5FF)')+';width:'+(tot?(ck/tot*100):0)+'%;transition:width .5s"></div></div><div style="display:flex;justify-content:space-between;font-size:12px;color:rgba(255,255,255,.25);margin-top:4px"><span>已到'+ck+'</span><span>共'+tot+'</span></div></div></div>';h+='<div style="display:flex;gap:8px;margin-top:10px"><button onclick="showNewRoundModal()" style="flex:1;padding:10px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;background:rgba(0,176,255,.08);border:1px solid rgba(0,176,255,.2);color:#00B0FF">新一轮</button><button onclick="showAddModal()" style="flex:1;padding:10px;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;background:rgba(255,176,0,.08);border:1px solid rgba(255,176,0,.2);color:#FFB000">+ 加人</button></div>';h+='<div style="position:relative;margin-top:10px"><input id="search-input" value="'+searchQuery.replace(/"/g,'&quot;')+'" oninput="setSearch(this.value)" placeholder="搜索姓名..." style="width:100%;padding:10px 14px 10px 36px;border-radius:8px;font-size:15px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:#fff;outline:none"><span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:14px;color:rgba(255,255,255,.2)">🔍</span>';if(searchQuery)h+='<button onclick="clearSearch()" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:rgba(255,255,255,.1);border:none;border-radius:50%;width:20px;height:20px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,.4);font-size:12px;cursor:pointer">✕</button>';h+='</div></div><div style="padding:0 16px 100px">';if(ny.length){h+='<div style="font-size:12px;font-weight:600;color:#FF6B6B;padding:8px 0;border-bottom:1px solid rgba(255,107,107,.15);margin-bottom:4px;display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:#FF6B6B;display:inline-block"></span>未到·'+ny.length+'人';if(q)h+='<span style="color:rgba(255,255,255,.2);font-weight:400">（搜索）</span>';h+='</div>';ny.forEach(p=>{h+='<div class="'+(p.id===justId?'row-enter':'')+'" style="display:flex;align-items:center;padding:12px;border-bottom:1px solid rgba(255,255,255,.04)"><div onclick="demoClick('+p.id+')" style="width:40px;height:40px;border-radius:10px;background:linear-gradient(135deg,rgba(255,107,107,.15),rgba(255,107,107,.05));display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:#FF6B6B;margin-right:12px;cursor:pointer">'+p.name[0]+'</div><div onclick="demoClick('+p.id+')" style="flex:1;cursor:pointer"><div style="font-size:18px;font-weight:600">'+p.name;if(p.isTemp)h+='<span style="font-size:11px;color:#FFB000;margin-left:6px">临时</span>';h+='</div></div>';if(p.phone)h+='<a href="tel:'+p.phone+'" onclick="event.stopPropagation()" style="width:36px;height:36px;border-radius:8px;background:rgba(0,230,118,.08);border:1px solid rgba(0,230,118,.15);display:flex;align-items:center;justify-content:center;text-decoration:none;margin-left:8px"><span style="font-size:16px">📞</span></a>';h+='</div>'})}if(dn.length){h+='<div style="font-size:12px;font-weight:600;color:rgba(0,230,118,.5);padding:12px 0 8px;border-bottom:1px solid rgba(0,230,118,.08);margin-top:8px;margin-bottom:4px;display:flex;align-items:center;gap:6px"><span style="width:6px;height:6px;border-radius:50%;background:rgba(0,230,118,.5);display:inline-block"></span>已到·'+dn.length+'人</div>';dn.forEach(p=>{h+='<div class="'+(p.id===justId?'row-enter':'')+'" style="display:flex;align-items:center;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.02);opacity:.4"><div style="width:32px;height:32px;border-radius:8px;background:rgba(0,230,118,.08);display:flex;align-items:center;justify-content:center;font-size:13px;color:rgba(0,230,118,.6);margin-right:12px">✓</div><div style="flex:1"><span style="font-size:15px;color:rgba(255,255,255,.6)">'+p.name;if(p.isTemp)h+='<span style="font-size:11px;color:rgba(255,176,0,.4);margin-left:6px">临时</span>';h+='</span></div><span style="font-size:11px;color:rgba(255,255,255,.15);margin-right:8px">'+p.time+'</span><button onclick="showUndoModal('+p.id+')" style="padding:4px 10px;border-radius:6px;font-size:11px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);color:rgba(255,255,255,.3);cursor:pointer;font-family:inherit">撤销</button></div>'})}if(q&&!ny.length&&!dn.length)h+='<div style="text-align:center;padding:40px 0;color:rgba(255,255,255,.15)">未找到「'+q+'」</div>';h+='</div>';document.getElementById('app').innerHTML=h}!function(){const n="张伟,李娜,王强,刘洋,陈静,杨磊,赵敏,黄海,周芳,吴涛,徐明,孙悦,胡博,朱雅,高飞,林慧,何鑫,郭欣,马超,罗平,梁宇,宋婷,郑刚,谢瑶,韩旭,唐睿,冯思,于晨,董萌,萧阳,程峰,曹雨,袁翔,邓佳,许乐,傅琪,沈昊,曾诗,彭志,吕建,苏梦,卢岩,蒋华,蔡文,贾鹏,丁霞,魏国,薛勇,叶军,阎杰,余欣怡,潘天宇,杜雅琪,戴浩然,夏诗涵,钟博文,汪嘉欣,田睿阳,任梦瑶,姜志远,范雨萱,方俊杰,石佳慧,姚宇航,谭思琪,廖浩宇,邹心怡,熊明哲,金雅婷,陆天翔,郝子涵,孔思远,白雨桐,崔晨曦,康若溪,毛嘉豪,邱紫萱,秦逸飞,江诗语,尹浩铭,钱思颖,龙峻熙,万梓萌,段子墨,雷可欣,侯文博,龚雨彤,邵明轩,洪思瑜,贺子豪,文雅馨,常博远,温可馨,武逸辰,柳思琦,施皓宇,顾梦涵,牛嘉琪,尚子轩,樊悦然".split(',');for(let i=0;i<n.length;i++)roster.push({id:i,name:n[i],uid:'',phone:'1380000'+(1001+i),bus:i<53?1:2,checkedIn:false,time:null,ckOrder:0,isTemp:false})}();render();connectWS()</script></body></html>"""
 
 def main():
     import uvicorn
-    print("="*50)
-    print("  NFC 签到系统 v5.0")
-    print("  搜索·拨号·撤销·计时·多车·多轮·临时加人")
-    print("="*50)
-    print()
-    load_roster()
-    reader=NFCReader()
-    app=create_app()
-    loop=asyncio.new_event_loop()
-    if reader.available:
-        threading.Thread(target=nfc_poll_loop,args=(reader,loop),daemon=True).start()
-        print("[INFO] NFC读卡器就绪")
-    else:print("[INFO] 无读卡器，演示模式")
-    print(f"\n[INFO] 签到地址: http://localhost:{CONFIG['port']}\n[INFO] Ctrl+C 停止\n")
-    uvicorn.run(app,host=CONFIG["host"],port=CONFIG["port"],loop="asyncio")
+    print("="*50);print("  NFC 签到系统 v5.1");print("="*50);print()
+    load_roster();reader=NFCReader();app=create_app(reader)
+    print(f"\n[INFO] http://localhost:{CONFIG['port']}\n")
+    uvicorn.run(app,host=CONFIG["host"],port=CONFIG["port"])
 
 if __name__=="__main__":main()
