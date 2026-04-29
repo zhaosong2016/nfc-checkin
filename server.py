@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 NFC v5.1 - 修复实时推送
 """
@@ -65,8 +66,11 @@ class NFCReader:
     def read_uid(self):
         if not self.available:return None
         try:
-            from smartcard.util import toHexString;c=self.reader.createConnection();c.connect()
+            from smartcard.util import toHexString
+            c=self.reader.createConnection();c.connect()
             data,sw1,sw2=c.transmit([0xFF,0xCA,0x00,0x00,0x00])
+            try:c.disconnect()
+            except:pass
             if sw1==0x90 and sw2==0x00:
                 uid=toHexString(data).replace(" ",":");now=time.time()
                 if uid==self.last_uid and(now-self.last_read_time)<2.0:return None
@@ -90,8 +94,15 @@ def safe_broadcast(msg):
 
 def nfc_poll_loop(reader):
     print("[INFO] NFC轮询已启动")
+    err_count=0
     while True:
-        uid=reader.read_uid()
+        try:
+            uid=reader.read_uid()
+            err_count=0
+        except Exception as e:
+            err_count+=1
+            if err_count<=3:print(f"[WARN] NFC读取异常: {e}")
+            time.sleep(1);continue
         if uid:
             print(f"[NFC] 读取到卡片: {uid}")
             person=find_person_by_uid(uid)
@@ -149,6 +160,7 @@ def create_app(reader):
                     for p in roster:
                         if p.get("bus",1)==bus:p["checkedIn"]=False;p["time"]=None
                     await broadcast({"type":"roster","roster":roster})
+                    push_to_cloud({"type":"roster_reset"})
                 elif msg.get("type")=="add_temp":
                     name=msg.get("name","").strip();bus=msg.get("bus",1)
                     if name:
