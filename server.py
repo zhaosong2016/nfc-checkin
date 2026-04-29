@@ -110,7 +110,7 @@ def nfc_poll_loop(reader):
         time.sleep(CONFIG["poll_interval"])
 
 def create_app(reader):
-    from fastapi import FastAPI,WebSocket,WebSocketDisconnect
+    from fastapi import FastAPI,WebSocket,WebSocketDisconnect,Request
     from fastapi.responses import HTMLResponse,JSONResponse
     app=FastAPI(title="NFC签到")
     @app.on_event("startup")
@@ -159,11 +159,9 @@ def create_app(reader):
     @app.get("/api/roster")
     async def get_roster():return JSONResponse(roster)
     @app.post("/api/push")
-    async def receive_push(request):
-        from fastapi import Request
+    async def receive_push(request:Request):
         if request.headers.get("X-Secret")!=CLOUD_SECRET:
-            from fastapi.responses import JSONResponse as JR
-            return JR({"error":"forbidden"},status_code=403)
+            return JSONResponse({"error":"forbidden"},status_code=403)
         msg=await request.json()
         if msg.get("type")=="checkin":
             pid=msg.get("id")
