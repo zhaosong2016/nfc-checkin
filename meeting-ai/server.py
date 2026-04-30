@@ -639,7 +639,7 @@ async function backToTrip(){
 (function init(){
   const p=new URLSearchParams(location.search);
   const trip=p.get('trip');
-  if(location.pathname.startsWith('/m')){
+  if(location.pathname==='/m'||location.pathname.startsWith('/m/')){
     renderJoin(trip);
   }else{
     renderHome();
