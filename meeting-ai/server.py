@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import uuid
 import httpx
@@ -8,8 +9,30 @@ from pydantic import BaseModel
 
 app = FastAPI()
 
-trips = {}
-rooms = {}
+DATA_FILE = os.path.join(os.path.dirname(__file__), "data.json")
+
+def load_data():
+    if os.path.exists(DATA_FILE):
+        try:
+            d = json.load(open(DATA_FILE))
+            return d.get("trips", {}), d.get("rooms", {})
+        except Exception:
+            pass
+    return {}, {}
+
+def save_data():
+    rooms_serializable = {}
+    for rid, r in rooms.items():
+        rc = dict(r)
+        rc["votes"] = {k: list(v) for k, v in r["votes"].items()}
+        rooms_serializable[rid] = rc
+    with open(DATA_FILE, "w") as f:
+        json.dump({"trips": trips, "rooms": rooms_serializable}, f, ensure_ascii=False)
+
+trips, rooms = load_data()
+# Restore votes as sets
+for r in rooms.values():
+    r["votes"] = {k: set(v) for k, v in r.get("votes", {}).items()}
 
 CLAUDE_API_KEY = "sk-acw-ab368e23-755e2f50282649ed"
 CLAUDE_BASE_URL = "https://api.aicodewith.com"
@@ -97,6 +120,7 @@ async def create_trip(req: CreateTripReq):
         "rooms": [],
         "created_at": time.time(),
     }
+    save_data()
     return {"trip_id": trip_id}
 
 
@@ -132,6 +156,7 @@ async def create_room(trip_id: str, req: CreateRoomReq):
         "created_at": time.time(),
     }
     trip["rooms"].append(room_id)
+    save_data()
     return {"room_id": room_id}
 
 
@@ -163,6 +188,7 @@ async def post_message(room_id: str, req: PostMsgReq):
         "timestamp": time.time(),
     }
     room["messages"].append(msg)
+    save_data()
     await manager.broadcast(room_id, {"type": "new_message", "message": msg})
     return msg
 
@@ -189,6 +215,7 @@ async def summarize_room(room_id: str, admin_password: str):
         raise HTTPException(500, f"AI调用失败: {resp.text[:200]}")
     summary = resp.json()["content"][0]["text"]
     room["summary"] = summary
+    save_data()
     await manager.broadcast(room_id, {"type": "summary", "summary": summary})
     return {"summary": summary}
 
@@ -219,6 +246,7 @@ async def rank_messages(room_id: str, admin_password: str):
         raise HTTPException(500, "AI返回格式错误")
     room["top5"] = top5
     room["votes"] = {item["id"]: set() for item in top5}
+    save_data()
     votes_out = {k: [] for k in room["votes"]}
     await manager.broadcast(room_id, {"type": "top5", "top5": top5, "votes": votes_out})
     return {"top5": top5}
@@ -234,6 +262,7 @@ async def vote_message(room_id: str, req: VoteReq):
     for voters in room["votes"].values():
         voters.discard(req.voter)
     room["votes"][req.message_id].add(req.voter)
+    save_data()
     votes_out = {k: list(v) for k, v in room["votes"].items()}
     await manager.broadcast(room_id, {"type": "votes_update", "votes": votes_out})
     return {"ok": True}
@@ -257,6 +286,7 @@ async def update_prompt(trip_id: str, req: UpdatePromptReq):
     if trip["admin_password"] != req.admin_password:
         raise HTTPException(403, "密码错误")
     trip["ai_prompt"] = req.prompt
+    save_data()
     return {"ok": True}
 
 
