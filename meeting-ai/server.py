@@ -359,34 +359,53 @@ function renderHome(){
 <div class="header"><h1>游学会议</h1></div>
 <div class="container">
   <div class="card">
-    <h2>加入行程</h2>
-    <div class="label">行程码</div>
-    <input id="joinCode" placeholder="输入8位行程码" maxlength="8">
-    <div class="gap"><div class="label">你的名字</div>
-    <input id="joinName" placeholder="输入你的名字"></div>
-    <div class="gap"><button class="btn btn-primary" onclick="doJoin()">进入行程</button></div>
-  </div>
-  <div class="card">
-    <h2>创建行程（主持人）</h2>
+    <h2>创建行程</h2>
     <div class="label">行程名称</div>
     <input id="tripName" placeholder="如：硅谷游学2026">
     <div class="gap"><div class="label">管理员密码</div>
     <input id="tripPwd" type="password" placeholder="设置密码，用于管理员操作"></div>
-    <div class="gap"><button class="btn btn-secondary" onclick="doCreate()">创建行程</button></div>
+    <div class="gap"><button class="btn btn-primary" onclick="doCreate()">创建行程</button></div>
   </div>
 </div>`;
 }
 
-async function doJoin(){
-  const code=$('joinCode').value.trim();
+function renderJoin(tripId){
+  if(!tripId){
+    app().innerHTML=`
+<div class="header"><h1>游学会议</h1></div>
+<div class="container">
+  <div class="card" style="text-align:center;padding:40px 20px">
+    <div style="font-size:48px;margin-bottom:16px">📱</div>
+    <div style="font-size:16px;color:#666">请扫描主持人提供的二维码加入会议</div>
+  </div>
+</div>`;
+    return;
+  }
+  api('GET','/meeting/api/trips/'+tripId).then(d=>{
+    S.tripId=tripId;S.tripData=d;
+    const saved=localStorage.getItem('meeting_name_'+tripId);
+    if(saved){S.userName=saved;renderTrip();return}
+    app().innerHTML=`
+<div class="header"><h1>${d.name}</h1></div>
+<div class="container">
+  <div class="card">
+    <h2>加入会议</h2>
+    <div class="label">你的名字</div>
+    <input id="joinName" placeholder="输入你的名字" autofocus>
+    <div class="gap"><button class="btn btn-primary" onclick="doJoinByName()">进入</button></div>
+  </div>
+</div>`;
+  }).catch(()=>{
+    app().innerHTML=`<div class="header"><h1>游学会议</h1></div><div class="container"><div class="card"><div class="empty">行程不存在或已结束</div></div></div>`;
+  });
+}
+
+async function doJoinByName(){
   const name=$('joinName').value.trim();
-  if(!code||!name){toast('请填写行程码和名字');return}
-  try{
-    const d=await api('GET','/meeting/api/trips/'+code);
-    S.tripId=code;S.userName=name;S.tripData=d;
-    localStorage.setItem('meeting_name_'+code,name);
-    renderTrip();
-  }catch(e){toast(e.message)}
+  if(!name){toast('请输入你的名字');return}
+  S.userName=name;
+  localStorage.setItem('meeting_name_'+S.tripId,name);
+  renderTrip();
 }
 
 async function doCreate(){
@@ -405,7 +424,7 @@ async function doCreate(){
 function renderTrip(){
   const t=S.tripData;
   const isAdmin=!!S.adminPwd;
-  const joinUrl=location.origin+'/meeting?trip='+S.tripId;
+  const joinUrl=location.origin+'/m?trip='+S.tripId;
   const qrUrl='https://api.qrserver.com/v1/create-qr-code/?size=180x180&data='+encodeURIComponent(joinUrl);
   let roomsHtml=t.rooms.length?t.rooms.map(r=>`
     <div class="room-card" onclick="enterRoom('${r.id}')">
@@ -616,21 +635,15 @@ async function backToTrip(){
   renderTrip();
 }
 
-// Handle ?trip= param on load
+// Route by path: /m = participant, /meeting = host
 (function init(){
   const p=new URLSearchParams(location.search);
   const trip=p.get('trip');
-  if(trip){
-    S.tripId=trip;
-    const saved=localStorage.getItem('meeting_name_'+trip);
-    if(saved){
-      S.userName=saved;
-      api('GET','/meeting/api/trips/'+trip).then(d=>{S.tripData=d;renderTrip()}).catch(()=>renderHome());
-    }else{
-      renderHome();
-      setTimeout(()=>{if($('joinCode'))$('joinCode').value=trip},100);
-    }
-  }else{renderHome()}
+  if(location.pathname.startsWith('/m')){
+    renderJoin(trip);
+  }else{
+    renderHome();
+  }
 })();
 </script>
 </body>
@@ -639,6 +652,8 @@ async function backToTrip(){
 
 @app.get("/meeting", response_class=HTMLResponse)
 @app.get("/meeting/", response_class=HTMLResponse)
+@app.get("/m", response_class=HTMLResponse)
+@app.get("/m/", response_class=HTMLResponse)
 async def meeting_home():
     return HTML
 
