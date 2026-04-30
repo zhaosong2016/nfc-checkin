@@ -159,6 +159,7 @@ def create_app(reader):
                     for p in roster:
                         if p["id"]==pid:p["checkedIn"]=False;p["time"]=None
                     await broadcast({"type":"roster","roster":roster})
+                    push_to_cloud({"type":"undo_checkin","id":pid})
                 elif msg.get("type")=="reset_bus":
                     bus=msg.get("bus",1)
                     for p in roster:
@@ -191,6 +192,11 @@ def create_app(reader):
                 await broadcast(msg)
         elif msg.get("type")=="roster_reset":
             for p in roster:p["checkedIn"]=False;p["time"]=None
+            await broadcast({"type":"roster","roster":roster})
+        elif msg.get("type")=="undo_checkin":
+            pid=msg.get("id")
+            for p in roster:
+                if p["id"]==pid:p["checkedIn"]=False;p["time"]=None
             await broadcast({"type":"roster","roster":roster})
         return JSONResponse({"ok":True})
     return app
