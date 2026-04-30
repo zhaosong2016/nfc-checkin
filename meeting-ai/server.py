@@ -460,8 +460,26 @@ function renderTrip(){
 }
 
 function showAdminLogin(){
-  const pwd=prompt('请输入管理员密码');
-  if(!pwd)return;
+  const bg=document.createElement('div');
+  bg.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px';
+  bg.innerHTML=`<div style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:320px">
+    <div style="font-size:17px;font-weight:600;margin-bottom:16px">管理员登录</div>
+    <input id="adminPwdInput" type="password" placeholder="输入管理员密码" style="width:100%;border:1.5px solid #e0e0e0;border-radius:10px;padding:12px 14px;font-size:15px;outline:none;margin-bottom:12px">
+    <div style="display:flex;gap:10px">
+      <button onclick="this.closest('div[style]').remove()" style="flex:1;padding:12px;border:none;border-radius:10px;background:#f0f0f5;font-size:15px;font-weight:600;cursor:pointer">取消</button>
+      <button onclick="confirmAdminLogin()" style="flex:1;padding:12px;border:none;border-radius:10px;background:#007aff;color:#fff;font-size:15px;font-weight:600;cursor:pointer">确认</button>
+    </div>
+  </div>`;
+  document.body.appendChild(bg);
+  setTimeout(()=>document.getElementById('adminPwdInput')&&document.getElementById('adminPwdInput').focus(),100);
+}
+
+function confirmAdminLogin(){
+  const input=document.getElementById('adminPwdInput');
+  if(!input)return;
+  const pwd=input.value.trim();
+  if(!pwd){toast('请输入密码');return}
+  document.querySelector('div[style*="inset:0"]')?.remove();
   api('GET','/meeting/api/trips/'+S.tripId+'/prompt?admin_password='+encodeURIComponent(pwd))
     .then(()=>{S.adminPwd=pwd;toast('管理员模式已开启');renderTrip()})
     .catch(()=>{toast('密码错误')});
