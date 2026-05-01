@@ -134,6 +134,21 @@ def create_app(reader):
         global main_loop
         main_loop=asyncio.get_running_loop()
         print("[INFO] 主事件循环已就绪")
+        # 从云端同步签到状态，避免重启后状态丢失
+        if CLOUD_URL:
+            try:
+                import urllib.request
+                req=urllib.request.Request(CLOUD_URL.rstrip("/")+"/api/roster")
+                with urllib.request.urlopen(req,timeout=5) as r:
+                    cloud=json.loads(r.read())
+                synced=0
+                for cp in cloud:
+                    lp=next((p for p in roster if p["id"]==cp["id"]),None)
+                    if lp and cp.get("checkedIn"):
+                        lp["checkedIn"]=True;lp["time"]=cp.get("time","");synced+=1
+                print(f"[INFO] 从云端同步 {synced} 条签到记录")
+            except Exception as e:
+                print(f"[WARN] 云端同步失败: {e}")
         reader._init()
         if reader.available:
             threading.Thread(target=nfc_poll_loop,args=(reader,),daemon=True).start()
