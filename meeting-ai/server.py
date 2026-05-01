@@ -48,8 +48,9 @@ DEFAULT_PROMPT = (
 )
 
 RANK_PROMPT = (
-    "请从以下会议发言中，选出最有价值的5条（可以是问题、观点或建议）。\n"
-    "评选标准：思考深度、创新性、实用性、启发性。\n\n"
+    "请从以下会议发言中，选出所有质量较高、值得关注的发言（可以是问题、观点或建议）。\n"
+    "评选标准：思考深度、创新性、实用性、启发性。\n"
+    "数量不限，选出所有达到较高水准的发言，通常3-8条。\n\n"
     '请以JSON格式返回：{"top5": [{"id": "消息id", "reason": "入选理由（一句话）"}, ...]}\n\n'
     "只返回JSON，不要其他内容。"
 )
@@ -241,9 +242,20 @@ async def rank_messages(room_id: str, admin_password: str):
     if resp.status_code != 200:
         raise HTTPException(500, f"AI调用失败: {resp.text[:200]}")
     try:
-        top5 = json.loads(resp.json()["content"][0]["text"]).get("top5", [])
-    except Exception:
-        raise HTTPException(500, "AI返回格式错误")
+        raw_text = resp.json()["content"][0]["text"]
+        print("AI rank raw:", raw_text[:500])
+        top5 = json.loads(raw_text).get("top5", [])
+    except Exception as e:
+        raw = resp.text[:300] if resp else "no response"
+        print("AI rank error:", e, "raw:", raw)
+        raise HTTPException(500, f"AI返回格式错误: {raw_text[:200] if 'raw_text' in dir() else raw}")
+    # 把消息内容直接塞进 top5，客户端不用再查找
+    msg_map = {m["id"]: m for m in room["messages"]}
+    for item in top5:
+        msg = msg_map.get(item["id"])
+        if msg:
+            item["author"] = msg["author"]
+            item["content"] = msg["content"]
     room["top5"] = top5
     room["votes"] = {item["id"]: set() for item in top5}
     save_data()
@@ -259,9 +271,16 @@ async def vote_message(room_id: str, req: VoteReq):
         raise HTTPException(404, "会议室不存在")
     if req.message_id not in room["votes"]:
         raise HTTPException(400, "该消息不在候选列表中")
-    for voters in room["votes"].values():
-        voters.discard(req.voter)
-    room["votes"][req.message_id].add(req.voter)
+    # 每人最多 3 票，同一条不能重复投
+    voter_votes = sum(1 for voters in room["votes"].values() if req.voter in voters)
+    already_voted_this = req.voter in room["votes"][req.message_id]
+    if already_voted_this:
+        # 取消这一票
+        room["votes"][req.message_id].discard(req.voter)
+    elif voter_votes >= 3:
+        raise HTTPException(400, "每人最多投3票")
+    else:
+        room["votes"][req.message_id].add(req.voter)
     save_data()
     votes_out = {k: list(v) for k, v in room["votes"].items()}
     await manager.broadcast(room_id, {"type": "votes_update", "votes": votes_out})
@@ -384,10 +403,29 @@ async function api(method,path,body){
   return d;
 }
 
+function getAdminTrips(){
+  try{return JSON.parse(localStorage.getItem('meeting_admin_trips')||'[]')}catch(e){return[]}
+}
+
+function saveAdminTrip(tripId,name,adminPwd){
+  const list=getAdminTrips().filter(t=>t.tripId!==tripId);
+  list.unshift({tripId,name,adminPwd});
+  localStorage.setItem('meeting_admin_trips',JSON.stringify(list.slice(0,10)));
+}
+
 function renderHome(){
+  const myTrips=getAdminTrips();
+  const myTripsHtml=myTrips.length?`
+  <div class="card"><h2>我的行程</h2>
+    ${myTrips.map(t=>`<div class="room-card" onclick="reenterTrip('${t.tripId}','${t.adminPwd}')">
+      <div><div class="room-name">${t.name}</div><div class="room-meta">${t.tripId}</div></div>
+      <div class="arrow">›</div>
+    </div>`).join('')}
+  </div>`:'';
   app().innerHTML=`
 <div class="header"><h1>游学会议</h1></div>
 <div class="container">
+  ${myTripsHtml}
   <div class="card">
     <h2>创建行程</h2>
     <div class="label">行程名称</div>
@@ -399,7 +437,16 @@ function renderHome(){
 </div>`;
 }
 
+async function reenterTrip(tripId,adminPwd){
+  try{
+    const td=await api('GET','/meeting/api/trips/'+tripId);
+    S.tripId=tripId;S.adminPwd=adminPwd;S.userName='主持人';S.tripData=td;
+    renderTrip();
+  }catch(e){toast(e.message)}
+}
+
 function renderJoin(tripId){
+  S.adminPwd=null;
   if(!tripId){
     app().innerHTML=`
 <div class="header"><h1>游学会议</h1></div>
@@ -445,10 +492,16 @@ async function doCreate(){
   try{
     const d=await api('POST','/meeting/api/trips',{name,admin_password:pwd});
     S.tripId=d.trip_id;S.adminPwd=pwd;S.userName='主持人';
+    saveAdminTrip(d.trip_id,name,pwd);
     const td=await api('GET','/meeting/api/trips/'+d.trip_id);
     S.tripData=td;
     renderTrip();
   }catch(e){toast(e.message)}
+}
+
+function copyJoinLink(){
+  const url=location.origin+'/m?trip='+S.tripId;
+  navigator.clipboard.writeText(url).then(()=>toast('链接已复制')).catch(()=>toast(url));
 }
 
 function renderTrip(){
@@ -479,9 +532,10 @@ function renderTrip(){
   ${isAdmin?'<span class="tag" style="margin-left:auto">管理员</span>':''}
 </div>
 <div class="container">
-  <div class="card"><h2>扫码加入</h2>
+  ${isAdmin?`<div class="card"><h2>邀请参会者</h2>
     <div class="qr-box"><img src="${qrUrl}" alt="QR"><div class="qr-url">行程码：<b>${S.tripId}</b></div></div>
-  </div>
+    <div class="gap"><button class="btn btn-secondary btn-sm" onclick="copyJoinLink()">复制参会链接</button></div>
+  </div>`:''}
   <div class="card"><h2>会议室列表</h2>${roomsHtml}</div>
   ${adminHtml}
   ${!isAdmin?'<div class="admin-toggle" onclick="showAdminLogin()">管理员登录</div>':''}
@@ -592,7 +646,7 @@ function renderRoom(){
     </div>
   </div>
   <div id="summaryBox">${r.summary?`<div class="card"><h2>AI总结</h2><div class="summary-box">${r.summary}</div></div>`:''}</div>
-  <div id="top5Box">${r.top5.length?`<div class="card"><h2>精华发言投票</h2>${renderTop5Html(r.top5,r.votes)}</div>`:''}</div>
+  <div id="top5Box">${r.top5.length?`<div class="card">${voteHeader(r.votes)}${renderTop5Html(r.top5,r.votes)}</div>`:''}</div>
   ${adminHtml}
 </div>`;
   scrollMsgs();
@@ -618,35 +672,48 @@ function showSummary(text){
 }
 
 function renderTop5Html(top5,votes){
-  const ranks=['🥇','🥈','🥉','4️⃣','5️⃣'];
-  return top5.map((item,i)=>{
-    const msg=S.roomData.messages.find(m=>m.id===item.id)||{author:'',content:item.id};
+  const medals=['🥇','🥈','🥉'];
+  // 按票数排序（票数相同保持原顺序）
+  const sorted=[...top5].map(item=>({...item,_votes:(votes[item.id]||[]).length}))
+    .sort((a,b)=>b._votes-a._votes);
+  const hasVotes=sorted.some(item=>item._votes>0);
+  return sorted.map((item,i)=>{
     const vlist=votes[item.id]||[];
     const voted=vlist.includes(S.userName);
+    const rank=hasVotes?(medals[i]||`<span style="font-size:15px;font-weight:700;color:#888">${i+1}</span>`):'';
     return `<div class="top5-item">
-      <div class="top5-rank">${ranks[i]}</div>
+      <div class="top5-rank" style="min-width:28px">${rank}</div>
       <div class="top5-body">
-        <div class="top5-content"><b>${msg.author}</b>：${msg.content}</div>
+        <div class="top5-content"><b>${item.author||''}</b>：${item.content||item.id}</div>
         <div class="top5-reason">${item.reason}</div>
-        <div style="margin-top:6px">
+        <div style="margin-top:6px;display:flex;align-items:center;gap:10px">
           <button class="vote-btn${voted?' voted':''}" onclick="doVote('${item.id}')">${voted?'已投票':'投票'}</button>
-          <span class="vote-count">${vlist.length} 票</span>
+          ${item._votes>0?`<span style="font-size:16px;font-weight:700;color:#007aff">${item._votes} 票</span>`:'<span class="vote-count">0 票</span>'}
         </div>
       </div>
     </div>`;
   }).join('');
 }
 
+function voteHeader(votes){
+  const used=S.userName?Object.values(votes).filter(v=>v.includes(S.userName)).length:0;
+  const left=3-used;
+  return `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+    <h2 style="font-size:16px;font-weight:600">精华发言投票</h2>
+    <span style="font-size:13px;color:${left>0?'#007aff':'#aaa'}">${left > 0 ? `剩余 ${left} 票` : '已投完'}</span>
+  </div>`;
+}
+
 function showTop5(top5,votes){
   S.roomData.top5=top5;S.roomData.votes=votes;
   const box=$('top5Box');
-  if(box)box.innerHTML=`<div class="card"><h2>精华发言投票</h2>${renderTop5Html(top5,votes)}</div>`;
+  if(box)box.innerHTML=`<div class="card">${voteHeader(votes)}${renderTop5Html(top5,votes)}</div>`;
 }
 
 function updateVotes(votes){
   S.roomData.votes=votes;
   const box=$('top5Box');
-  if(box&&S.roomData.top5.length)box.innerHTML=`<div class="card"><h2>精华发言投票</h2>${renderTop5Html(S.roomData.top5,votes)}</div>`;
+  if(box&&S.roomData.top5.length)box.innerHTML=`<div class="card">${voteHeader(votes)}${renderTop5Html(S.roomData.top5,votes)}</div>`;
 }
 
 async function doSend(){
@@ -673,8 +740,14 @@ async function doRank(){
 
 async function doVote(msgId){
   if(!S.userName){toast('请先输入名字');return}
-  try{await api('POST','/meeting/api/rooms/'+S.roomId+'/vote',{voter:S.userName,message_id:msgId})}
-  catch(e){toast(e.message)}
+  try{
+    await api('POST','/meeting/api/rooms/'+S.roomId+'/vote',{voter:S.userName,message_id:msgId});
+  }catch(e){toast(e.message)}
+}
+
+function myVoteCount(){
+  if(!S.roomData||!S.roomData.votes)return 0;
+  return Object.values(S.roomData.votes).filter(v=>v.includes(S.userName)).length;
 }
 
 async function backToTrip(){

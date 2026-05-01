@@ -1,6 +1,28 @@
 # NFC 签到系统 - 交接文档
 
-## 当前卡点（2026-04-29 深夜）
+## 当前卡点（2026-05-01）
+
+### Pi 静态 IP 未切换完成
+
+**目标**：Pi 连 Airdoc 热点时固定 IP 172.20.10.50，手机直接访问 http://172.20.10.50:8000。
+
+**已完成**：Pi 的 hotspot WiFi profile 已配置好：
+- SSID：Airdoc，密码：01234567
+- 静态 IP：172.20.10.50/24，网关/DNS：172.20.10.1
+
+**未完成**：Pi 目前仍在 CMCC-501（192.168.1.107），尚未切换到热点。
+
+**下次继续步骤**：
+1. Mac 和 Pi 都连到 CMCC-501
+2. `sshpass -p 'nfc2026' ssh -o StrictHostKeyChecking=no checkin2026i@192.168.1.107`
+3. 确认热点可见：`sudo nmcli dev wifi list | grep Airdoc`
+4. 切换：`sudo nmcli con up hotspot`（SSH 会断）
+5. Mac 切到 Airdoc，验证：`ping 172.20.10.50`
+6. 验证服务：`curl http://172.20.10.50:8000/api/roster`
+
+---
+
+## 旧卡点（2026-04-29 深夜）
 
 ### 问题描述
 
