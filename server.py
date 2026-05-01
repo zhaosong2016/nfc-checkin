@@ -2,7 +2,8 @@
 """
 NFC v5.1 - 修复实时推送
 """
-import asyncio,csv,json,time,threading,os
+import asyncio,csv,json,time,threading,os,sys
+sys.stdout=os.fdopen(sys.stdout.fileno(),'w',buffering=1)
 from datetime import datetime
 from pathlib import Path
 
@@ -64,6 +65,7 @@ class NFCReader:
                 self.reader=rl[0];print(f"[INFO] 已连接读卡器: {self.reader}");self.available=True;return
             except ImportError:print("[WARN] 未安装pyscard，演示模式");return
             except Exception as e:
+                import traceback;traceback.print_exc()
                 if attempt<4:time.sleep(1)
                 else:print(f"[WARN] 读卡器初始化失败: {e}")
     def read_uid(self):
