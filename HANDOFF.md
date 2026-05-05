@@ -1,24 +1,100 @@
 # NFC 签到系统 - 交接文档
 
-## 当前卡点（2026-05-01）
+## 当前状态（2026-05-05）
 
-### Pi 静态 IP 未切换完成
+### 系统已可正常使用
 
-**目标**：Pi 连 Airdoc 热点时固定 IP 172.20.10.50，手机直接访问 http://172.20.10.50:8000。
+**主入口**：`http://192.168.1.107:8000`（Pi 直连，CMCC-501 网络下）
+**备用显示**：`https://myspaceone.com/siliconvalley`（只看，不操作）
+**Pi 信息**：hostname `checkin2`，SSH `sshpass -p 'nfc2026' ssh checkin2026i@192.168.1.107`
 
-**已完成**：Pi 的 hotspot WiFi profile 已配置好：
-- SSID：Airdoc，密码：01234567
-- 静态 IP：172.20.10.50/24，网关/DNS：172.20.10.1
+**已解决的核心问题**：
+- 新一轮、撤销单人，现在都会同步到 Pi，Pi 再推云端，三端一致
+- 操作必须在 Pi 直连页面（8000 端口）进行，云端页面只是镜像
 
-**未完成**：Pi 目前仍在 CMCC-501（192.168.1.107），尚未切换到热点。
+**已绑卡**：赵嵩（UID: `5A:74:0E:87:03:41:89`）、周鹏（UID: `15:32:48:BF`）
 
-**下次继续步骤**：
-1. Mac 和 Pi 都连到 CMCC-501
-2. `sshpass -p 'nfc2026' ssh -o StrictHostKeyChecking=no checkin2026i@192.168.1.107`
-3. 确认热点可见：`sudo nmcli dev wifi list | grep Airdoc`
-4. 切换：`sudo nmcli con up hotspot`（SSH 会断）
-5. Mac 切到 Airdoc，验证：`ping 172.20.10.50`
-6. 验证服务：`curl http://172.20.10.50:8000/api/roster`
+---
+
+### 明天要做的事：配置备用 Pi
+
+明天在公司网络下，把备用 Pi 配置成和现在这台一样。步骤：
+
+**第一步：找到备用 Pi 的 IP**
+```bash
+# 备用 Pi 接上网线或连公司 WiFi 后，在路由器管理页面找 IP
+# 或者：
+ping raspberrypi.local   # 默认 hostname
+```
+
+**第二步：SSH 进去部署**
+```bash
+ssh pi@<备用Pi的IP>   # 默认密码 raspberry，或 checkin2026i / nfc2026
+
+# 安装依赖
+sudo apt-get update && sudo apt-get install -y python3-pip pcscd
+pip3 install fastapi uvicorn websockets pyscard httpx
+
+# 克隆代码
+git clone https://github.com/zhaosong2016/nfc-checkin.git
+cd nfc-checkin
+```
+
+**第三步：创建 systemd service**
+```bash
+sudo tee /etc/systemd/system/nfc-checkin.service > /dev/null << 'EOF'
+[Unit]
+Description=NFC Check-in System
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/checkin2026i/nfc-checkin/server.py
+WorkingDirectory=/home/checkin2026i/nfc-checkin
+Restart=always
+User=root
+Environment=CLOUD_URL=https://myspaceone.com/siliconvalley
+Environment=CLOUD_SECRET=nfc2026
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable nfc-checkin
+sudo systemctl start nfc-checkin
+```
+
+**第四步：验证**
+```bash
+systemctl status nfc-checkin
+curl http://localhost:8000/api/roster
+```
+
+---
+
+### 换热点/换网络
+
+到美国换新热点时，SSH 进 Pi 跑：
+```bash
+sudo nmcli dev wifi connect '新热点名' password '新密码'
+```
+Pi 会断开当前 WiFi 连上新的，SSH 断开后等 10 秒用新 IP 重连。
+
+---
+
+### 给下一个 AI 的话
+
+你好。这个系统的核心架构是：**Pi 是唯一数据源，云端是只读镜像**。
+
+几个容易踩的坑：
+1. **"没反应"的根本原因**：Pi 和云端状态不同步。Pi 认为某人已签到就不会推送，云端数字就不变。解法是在 Pi 直连页面点"新一轮"重置，不要在云端页面操作。
+2. **云端操作不会到 Pi**：云端 WebSocket 消息只在云端处理，不会转发给 Pi。所有写操作（签到、撤销、新一轮）必须通过 Pi 直连页面。
+3. **Pi 重启后会从云端同步状态**：startup 里有同步逻辑，正常。
+4. **读卡器被占用**：跑 `register_cards.py` 前必须先 `sudo systemctl stop nfc-checkin`，用完再 start。
+5. **新卡不识别**：ACR122U 只支持 13.56MHz 的卡（Mifare/NTAG），125kHz 的卡完全不兼容，绿灯不亮。
+
+祝顺利。
 
 ---
 
