@@ -15,12 +15,33 @@
 - systemd service `nfc-checkin` 已 enable，**重启自动起**
 - IP 是 DHCP 拿的（172.20.10.2），不是预想的 172.20.10.50 静态 IP——但够用，先不折腾
 
-**已绑卡（新卡，5/9 测试通过）**：
-- 龙仪：`53:9F:C2:26:94:00:01`
-- 赵嵩：`53:94:C2:26:94:00:01`（旧卡 5A:74:0E:87:03:41:89 已废弃）
-- 周鹏：`53:34:C2:26:94:00:01`（旧卡 15:32:48:BF 已废弃）
+**已绑卡（5/9 测试通过）**：**31 人全部绑定完毕**，全员刷卡端到端测试通过（2 分 06 秒完成 31 人签到）。
+- 全部 UID 见 `roster.csv`，已 commit 到 git
+- 旧卡 UID（赵嵩 `5A:74:0E:87:03:41:89`、周鹏 `15:32:48:BF`）已废弃，新卡 UID 前缀都是 `53:XX:C2/C1:26:94:00:01`
 
-**剩余 28 人未绑**，新卡到了再绑。
+### ⚠️ 待修问题（5/9 发现，未解决）
+
+**1. 云端推送失效（高优）**
+- 现象：Pi 端 31 人都签到成功，但 `https://myspaceone.com/siliconvalley/api/roster` 上看到的全部 `checkedIn=false`、`uid` 也全空
+- 影响：Pi 重启后从云端同步会拉到空状态，等于丢所有签到。带团时不在车上的人也看不到云端进度
+- 怀疑：Airdoc 美国网络下 Pi 推 https://myspaceone.com 失败（GFW？SSL？超时？）
+- 排查命令（要 Mac 在 Airdoc 网才能跑）：
+  ```bash
+  sshpass -p 'nfc2026' ssh checkin2026i@172.20.10.2 \
+    "sudo journalctl -u nfc-checkin --since '30 minutes ago' | grep -iE 'cloud|push|http|error|warn'"
+  ```
+- 临时措施：带团时只看 Pi 直连页面，不依赖云端
+
+**2. `register_cards.py` 改 csv 后 service 不会自动重读（中优）**
+- 现象：用 `register_cards.py` 绑卡完，刷新卡仍报"未知卡片"
+- 原因：service 启动时读 csv 进内存，运行中只看内存不看文件
+- 解法：每次绑完必须 `sudo systemctl restart nfc-checkin`
+- 改进方向：未来可以给 server.py 加个 `/api/reload_roster` 接口或 SIGHUP 信号
+
+**3. IP 是 DHCP（低优）**
+- 现状 172.20.10.2 是 DHCP 拿的，热点重启后可能变成别的 IP
+- 想稳定的话还是要再配一次 nmcli 静态 IP（参考之前的 172.20.10.50 方案，要 SSH 进 Pi 配）
+- 不急，目前能用
 
 ### 关键操作命令
 
