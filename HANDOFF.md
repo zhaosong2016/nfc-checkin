@@ -1,18 +1,53 @@
 # NFC 签到系统 - 交接文档
 
-## 当前状态（2026-05-05）
+## 当前状态（2026-05-09，美国）
 
-### 系统已可正常使用
+### 系统已可正常使用（Airdoc 热点）
 
-**主入口**：`http://192.168.1.107:8000`（Pi 直连，CMCC-501 网络下）
-**备用显示**：`https://myspaceone.com/siliconvalley`（只看，不操作）
-**Pi 信息**：hostname `checkin2`，SSH `sshpass -p 'nfc2026' ssh checkin2026i@192.168.1.107`
+**主入口**：`http://172.20.10.2:8000`（Pi 直连，**Airdoc 热点**下）
+**备用显示**：`https://myspaceone.com/siliconvalley`（只看，绝对不要点撤销/新一轮）
+**Pi 信息**：hostname `checkin2`，SSH `sshpass -p 'nfc2026' ssh checkin2026i@172.20.10.2`
 
-**已解决的核心问题**：
-- 新一轮、撤销单人，现在都会同步到 Pi，Pi 再推云端，三端一致
-- 操作必须在 Pi 直连页面（8000 端口）进行，云端页面只是镜像
+**这次重做了什么**：
+- SD 卡用 Pi Imager 全新烧录（系统是 **Debian 13 Trixie**，64-bit aarch64，不是之前的 Bookworm）
+- WiFi 预配 Airdoc/01234567，开机自动连
+- 重装 pcscd + 全套 Python 依赖（root 全局装，加 `--break-system-packages --ignore-installed`，因为 Trixie PEP668）
+- systemd service `nfc-checkin` 已 enable，**重启自动起**
+- IP 是 DHCP 拿的（172.20.10.2），不是预想的 172.20.10.50 静态 IP——但够用，先不折腾
 
-**已绑卡**：赵嵩（UID: `5A:74:0E:87:03:41:89`）、周鹏（UID: `15:32:48:BF`）
+**已绑卡（新卡，5/9 测试通过）**：
+- 龙仪：`53:9F:C2:26:94:00:01`
+- 赵嵩：`53:94:C2:26:94:00:01`（旧卡 5A:74:0E:87:03:41:89 已废弃）
+- 周鹏：`53:34:C2:26:94:00:01`（旧卡 15:32:48:BF 已废弃）
+
+**剩余 28 人未绑**，新卡到了再绑。
+
+### 关键操作命令
+
+```bash
+# SSH 进 Pi
+sshpass -p 'nfc2026' ssh checkin2026i@172.20.10.2
+
+# 看服务状态
+sudo systemctl status nfc-checkin
+sudo journalctl -u nfc-checkin -f   # 实时日志
+
+# 重启服务
+sudo systemctl restart nfc-checkin
+
+# 绑新卡（必须先停服务，读卡器只能被一个进程占）
+sudo systemctl stop nfc-checkin
+cd ~/nfc-checkin && sudo python3 register_cards.py
+sudo systemctl start nfc-checkin
+```
+
+### 这次踩的新坑（Trixie 特有）
+
+1. **pip 装包默认拒绝**（PEP 668）：必须加 `--break-system-packages`
+2. **typing_extensions 冲突**：Debian 自带的没有 RECORD 文件，pip 拆不了。加 `--ignore-installed` 跳过
+3. **systemd User=root 用不到 ~/.local/lib**：Python 包必须用 `sudo pip3 install`，root 全局装
+4. **新烧的卡 SSH 主机指纹变了**：Mac 端要 `ssh-keygen -R <IP>` 清旧记录或者 `-o UserKnownHostsFile=/dev/null`
+5. **iPhone 个人热点默认 5GHz**：必须开"最大兼容性"切到 2.4GHz，不然某些 Pi 看不到
 
 ---
 
