@@ -1,5 +1,103 @@
 # NFC 签到系统 - 交接文档
 
+## 🔥 2026-05-27 待办（赵嵩去公司路上,带着 Pi）
+
+### 优化已完成,但代码还没同步到 Pi
+
+今天家里改了 server.py,**已 commit + push 到 GitHub**(commit `d2d7923`),但 Pi 上还是老版本。需要带 Pi 到公司后,**同步代码 + 重启 service**。
+
+**这次改了什么:**
+- 手工签到不再闪 1 秒绿屏(排队签到时严重卡顿,改后 ~0.3 秒/人)
+- 顺手修了真 bug:之前手工签到只在前端本地改状态,**不发 ws 给 Pi**,等于伪签到 → 现在改成发 `manual_checkin` 给 Pi,Pi 处理 + 广播 + 推云端
+- 刷卡那条路完全不变,继续闪绿屏
+- 改动量:4 处微改,共 2 行加 2 行减
+
+### 公司接手 Claude 要做的事(按顺序)
+
+**前提:Pi 跟着赵嵩到公司了,公司电脑必须连上 Pi 当前的 WiFi 热点(Long1 或赵嵩当前用的)。**
+
+```bash
+# 1. 找 Pi(它在 iPhone 热点子网里,IP 通常 172.20.10.2)
+arp -a | grep -E "88:a2:9e"     # Pi 的 MAC 前缀
+# 看到 "88:a2:9e:3f:be:fc" 那行的 IP,就是备用 Pi
+
+# 2. SSH 进去看状态(用户名 checkin2026,不是 checkin2026i!备用 Pi 没那个 i)
+sshpass -p 'nfc2026' ssh checkin2026@172.20.10.2 "
+  systemctl is-active nfc-checkin
+  curl -s http://localhost:8000/api/roster | python3 -c 'import sys,json; d=json.load(sys.stdin); print(\"人数:\",len(d),\"已绑:\",sum(1 for p in d if p.get(\"uid\")))'
+"
+
+# 3. 同步最新 server.py(从 Mac 本地,iCloud 同步过来的最新版)
+cd "/Users/songsongsong/Library/Mobile Documents/com~apple~CloudDocs/同步盘/INNOVATION MAP/赵嵩项目/202601编程思维课/nfc-checkin"
+sshpass -p 'nfc2026' scp server.py checkin2026@172.20.10.2:~/nfc-checkin/server.py
+
+# 4. 重启 service
+sshpass -p 'nfc2026' ssh checkin2026@172.20.10.2 "echo nfc2026 | sudo -S systemctl restart nfc-checkin"
+
+# 5. 验证
+sshpass -p 'nfc2026' ssh checkin2026@172.20.10.2 "echo nfc2026 | sudo -S journalctl -u nfc-checkin -n 8 --no-pager"
+# 应该看到 "[INFO] 已加载 31 人名单 / 主事件循环已就绪 / 已连接读卡器 / NFC轮询已启动"
+```
+
+### 验证手工签到优化是否生效
+
+赵嵩手机连同一个热点,打开 `http://172.20.10.2:8000`:
+1. 点一个**未签到**的人 → 应该弹"**确认点名**"对话框
+2. 点"**确认签到**" → 对话框立刻消失 + 顶部 toast"X 已签到"闪一下 → **不再有 1 秒全屏绿色闪现**
+3. 名字立刻从"未到"挪到"已到"
+
+如果还闪绿屏,说明代码没真同步上去,看 `~/nfc-checkin/server.py` 里搜 `function doCheckin`,应该能看到 `silent` 这个参数。
+
+### 已知问题:Pi 连热点不稳定(5/27 在家又复现)
+
+赵嵩在家时 Pi 连 iPhone 热点反复掉线/连不上,试过的有效操作:
+1. 关掉 iPhone 个人热点 → 重新打开 → **保持设置页打开别退出**
+2. iPhone "最大兼容性" 默认开着(2.4GHz),不用反复确认
+3. 拔 Pi 电源等 5 秒重新插
+4. **Pi 凑近 iPhone 30cm 内**(信号问题不能完全排除)
+
+如果到公司后 Pi 又连不上公司能用的热点,优先排查:Pi 上的 WiFi profile 里有没有那个 SSID,有没有保存对应密码。备用 Pi 当前的 WiFi profile 是 Long1 那台 iPhone 的,**换其他热点要先 SSH 进 Pi 用 nmcli 加新 WiFi**——但**前提是要先 SSH 上**,这是个鸡生蛋问题。
+
+如果完全 SSH 不上,见下面"备用 Pi 信息"里的物理介入方案。
+
+---
+
+## 备用 Pi 信息(5/9 美国部署版,5/10 升级到 31 人名单)
+
+**主入口**:`http://172.20.10.2:8000`(在 iPhone 热点子网下)
+**SSH**:`sshpass -p 'nfc2026' ssh checkin2026@172.20.10.2`
+- 用户名 `checkin2026`(注意!主 Pi 是 `checkin2026i`,这个备用 Pi 没那个 `i`)
+- 密码 `nfc2026`
+- sudo 密码也是 `nfc2026`
+- hostname `checkin`(主 Pi 是 `checkin2`)
+- MAC `88:a2:9e:3f:be:fc`
+
+**已绑卡**:31 / 31 全部绑定(2026-05-10 在 Long1 热点下重新绑过一次,UID 跟主 Pi 不同,在备用 Pi 上 csv 里),美国带团时 100% 通过。
+
+**这台 Pi 不是 git 仓库**(代码是 5/10 用 scp 推的),所以**改代码后只能 scp,不能 git pull**。
+
+**Trixie 系统的几个坑**:
+- pip 装包必须 `--break-system-packages --ignore-installed`(PEP 668)
+- pyscard 的 import 名是 `smartcard` 不是 `pyscard`
+- systemd User=root 时 Python 包必须 `sudo pip3 install` 全局装
+- 新烧的卡 SSH 主机指纹会变,Mac 端 `ssh-keygen -R 172.20.10.2` 清旧记录
+- iPhone 个人热点子网固定是 `172.20.10.0/28`,不管 SSID 叫啥
+
+**待修问题(5/9 测试发现,至今没修)**:
+1. **云端推送失效**——Pi 端签到 31 人,云端 `myspaceone.com/siliconvalley` 看到全部 `checkedIn=false`。怀疑 Airdoc/iPhone 热点出 https 失败。Pi 重启后从云端同步会拉到空状态。**带团时只看 Pi 直连页面,不依赖云端**。
+2. **register_cards.py 改 csv 后 service 不会自动重读**——绑卡完必须 `sudo systemctl restart nfc-checkin` 才能让新 UID 生效
+3. **IP 是 DHCP**——热点重启后可能换 IP,扫一下网段重定位
+
+---
+
+## 主 Pi 信息(2026-05-09 重烧版,5/27 已挂)
+
+**主入口**:`http://192.168.1.107:8000`(以前在 CMCC-501 网络下),美国 Airdoc 时 IP 变成 172.20.10.2
+**SSH**:`sshpass -p 'nfc2026' ssh checkin2026i@<IP>` —— **注意用户名是 `checkin2026i` 带 `i`**
+- hostname `checkin2`
+- MAC `88:a2:9e:55:de:69`
+- 5/27 在家已挂(连不上热点,可能要重烧),目前以**备用 Pi 为主**
+
 ## 当前状态（2026-05-09，美国）
 
 ### 系统已可正常使用（Airdoc 热点）
