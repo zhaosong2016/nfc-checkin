@@ -1,6 +1,6 @@
 # 游学会议系统 交接文档
 
-最后更新：2026-04-30
+最后更新：2026-05-26
 
 ## 系统概述
 
@@ -69,6 +69,23 @@ location /m           { proxy_pass http://127.0.0.1:8001; ... }
 | POST | /meeting/api/rooms/{id}/vote | 投票 |
 | GET/POST | /meeting/api/trips/{id}/prompt | 查看/修改AI提示词（需密码） |
 | WS   | /meeting/ws/{room_id} | WebSocket 实时连接 |
+| POST | /meeting/api/trips/{id}/topics/enable | 开关议题模块（需密码） |
+| POST | /meeting/api/trips/{id}/topics/new_round | 开启新一轮议题（需密码） |
+| POST | /meeting/api/trips/{id}/topics/propose_open | 控制是否允许参会者提议题（需密码） |
+| POST | /meeting/api/trips/{id}/topics | 提议题 |
+| POST | /meeting/api/trips/{id}/topics/{tid}/signup | 报名议题 |
+| POST | /meeting/api/trips/{id}/topics/{tid}/unsignup | 取消报名 |
+| POST | /meeting/api/trips/{id}/topics/{tid}/toggle_full | 标记满员（需密码） |
+| POST | /meeting/api/trips/{id}/topics/{tid}/cancel | 取消议题（需密码） |
+| POST | /meeting/api/trips/{id}/topics/{tid}/delete | 删除议题（需密码） |
+| POST | /meeting/api/trips/{id}/mentors/enable | 开关导师评分模块（需密码） |
+| POST | /meeting/api/trips/{id}/mentors | 添加导师（需密码） |
+| POST | /meeting/api/trips/{id}/mentors/reorder | 调整导师顺序（需密码） |
+| POST | /meeting/api/trips/{id}/mentors/{mid}/avatar | 上传头像（需密码，multipart） |
+| POST | /meeting/api/trips/{id}/mentors/{mid}/rate | 提交评分 |
+| GET  | /meeting/api/trips/{id}/mentors/{mid}/my_rating?rater=X | 查看自己的评分 |
+| GET  | /meeting/api/trips/{id}/mentors/admin?admin_password=X | 管理员查看全部评分 |
+| GET  | /meeting/api/trips/{id}/mentors/export?admin_password=X | 导出评分数据 |
 
 ## AI 提示词
 
@@ -79,6 +96,19 @@ location /m           { proxy_pass http://127.0.0.1:8001; ... }
 主持人可在管理员模式下修改提示词，修改后立即生效。
 
 ## 更新日志
+
+### 2026-05-26
+
+- **议题协作模块**：行程下新增"议题"完整流程
+  - 管理员可开关议题模块、控制是否允许参会者提议题、开启新一轮
+  - 参会者可提议题（题目、说明、所在公司、行业）、报名加入感兴趣的议题、取消报名
+  - 管理员可标记议题满员、取消议题、删除议题
+- **导师评分模块**：行程下新增"导师"完整流程
+  - 管理员可开关模块、添加/删除导师、上传导师头像、调整顺序
+  - 参会者可对每位导师按 6 个维度打分（内容、深度、案例、表达、互动、综合）+ 留言
+  - 评分支持回看自己已打的分；管理员可看全部评分汇总，可导出
+- **依赖新增**：`python-multipart`（FastAPI 文件上传必需，用于导师头像）
+- **前端**：行程页新增 `tripTab` 状态切换（日程 / 议题 / 导师 三个 tab）
 
 ### 2026-05-07
 
